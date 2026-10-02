@@ -29,3 +29,6 @@ auth/
 pull-secret*
 *cloud-credentials*
 credentials-velero
+
+# Local precheck evidence (sanitize/review before any publication)
+evidence-local/
