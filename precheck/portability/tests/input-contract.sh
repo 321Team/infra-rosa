@@ -6,7 +6,7 @@ TASK_TMP="$(mktemp -d "${TMPDIR:-/tmp}/rosa-contract.XXXXXX")"
 trap 'rm -rf -- "$TASK_TMP"' EXIT
 mkdir -p "$TASK_TMP/rosa-test/precheck/portability" "$TASK_TMP/mockbin"
 cp "$SOURCE_ROOT/precheck/portability/uid-scc-admission.sh" "$TASK_TMP/rosa-test/precheck/portability/"
-printf 'evidence-local/\n' > "$TASK_TMP/rosa-test/.gitignore"
+printf 'evidence-local/\nignored-copy.sh\n' > "$TASK_TMP/rosa-test/.gitignore"
 git -C "$TASK_TMP/rosa-test" init -q
 git -C "$TASK_TMP/rosa-test" add .
 git -C "$TASK_TMP/rosa-test" -c user.name=ContractFixture -c user.email=fixture@example.invalid commit -qm fixture
@@ -55,6 +55,9 @@ cd "$FIXTURE"
 printf 'dirty\n' > dirty-input.txt
 expect_rc 8 env PORT_NS=j1-fds-app APP_IMAGE="$IMAGE" bash "$SCRIPT"
 rm dirty-input.txt
+cp "$SCRIPT" "$FIXTURE/ignored-copy.sh"
+expect_rc 9 env PORT_NS=j1-fds-app APP_IMAGE="$IMAGE" bash "$FIXTURE/ignored-copy.sh"
+rm "$FIXTURE/ignored-copy.sh"
 : > "$CALLLOG"
 env PORT_NS=j1-fds-app APP_IMAGE="$IMAGE" OUT_DIR="$FIXTURE/evidence-local/mock" bash "$SCRIPT" > "$ROOT/valid.stdout"
 [[ "$(grep -c '^create ' "$CALLLOG")" == 2 ]]
@@ -62,4 +65,4 @@ env PORT_NS=j1-fds-app APP_IMAGE="$IMAGE" OUT_DIR="$FIXTURE/evidence-local/mock"
 ! grep -Eq '^(apply|delete|patch|replace|edit|login) ' "$CALLLOG"
 grep -q '^RUNTIME=NOT_RUN$' "$FIXTURE/evidence-local/mock/result.txt"
 grep -q '^PG03=PARTIAL_ONLY$' "$FIXTURE/evidence-local/mock/result.txt"
-echo 'PASS: 9 fail-closed cases before oc; 2 server-dry-run creates; no cluster mutation; PG03 not promoted'
+echo 'PASS: 10 fail-closed cases before oc; 2 server-dry-run creates; no cluster mutation; PG03 not promoted'

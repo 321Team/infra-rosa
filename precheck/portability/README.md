@@ -141,6 +141,6 @@ PR 병합 또는 실제 Shared OCP 실행은 각각 별도 단계로 판단한�
 
 ## 2026-10-03 follow-up
 
-`bash precheck/portability/tests/input-contract.sh`는 임시 로컬 Git fixture와 oc mock으로 malformed image/namespace, non-repo/dirty source를 검증한다. 실제 cluster 연결/변경 없음. 실행은 Bash/git/sha256sum 기준이며 9 fault cases와 dry-run-only 두 요청을 확인한다. 이 결과는 MOCK이며 SCC/Runtime PASS가 아니다.
+`bash precheck/portability/tests/input-contract.sh`는 임시 로컬 Git fixture와 oc mock으로 malformed image/namespace, non-repo/dirty source를 검증한다. 실제 cluster 연결/변경 없음. 실행은 Bash/git/sha256sum 기준이며 10 fault cases (ignored copy 포함)와 dry-run-only 두 요청을 확인한다. 이 결과는 MOCK이며 SCC/Runtime PASS가 아니다.
 
 PG-03 Runtime은 [current architecture candidate](https://github.com/321Team/fds-project-architecture/pull/8) §6을 따른다. 실제 approved image/namespace/source에서 restricted-v2 arbitrary UID로 Running/Ready/health/imageID/RO filesystem과 필수 volume 접근/cleanup을 검증한다. 고정 UID 제거 admission PASS만으로 PG03 PASS 처리하지 않는다. Custom/broad SCC 우회 금지. 현 script는 admission-only이며 Runtime Pod 생성은 수행하지 않는다.

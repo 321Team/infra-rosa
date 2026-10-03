@@ -60,6 +60,18 @@ if [ "$CALLER_ROOT" != "$SCRIPT_ROOT" ]; then
   echo "ERROR: run from the script's Git repository." >&2
   exit 7
 fi
+SCRIPT_NAME="$(basename -- "${BASH_SOURCE[0]}")"
+git -C "$SCRIPT_DIR" ls-files --error-unmatch -- "$SCRIPT_NAME" >/dev/null 2>&1 || {
+  echo "ERROR: executing script is not tracked by this HEAD." >&2
+  exit 9
+}
+SCRIPT_PREFIX="$(git -C "$SCRIPT_DIR" rev-parse --show-prefix)" || exit 9
+EXPECTED_SCRIPT_BLOB="$(git rev-parse "HEAD:${SCRIPT_PREFIX}${SCRIPT_NAME}")" || exit 9
+ACTUAL_SCRIPT_BLOB="$(git -C "$SCRIPT_DIR" hash-object -- "$SCRIPT_NAME")" || exit 9
+if [ "$EXPECTED_SCRIPT_BLOB" != "$ACTUAL_SCRIPT_BLOB" ]; then
+  echo "ERROR: executing script differs from HEAD." >&2
+  exit 9
+fi
 DIRTY="$(git status --porcelain --untracked-files=normal)" || exit 7
 if [ -n "$DIRTY" ]; then
   echo "ERROR: dirty worktree; commit/review inputs before running." >&2
