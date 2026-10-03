@@ -28,13 +28,15 @@ if [ -z "$PORT_NS" ] || [ -z "$APP_IMAGE" ]; then
   exit 2
 fi
 
-case "$APP_IMAGE" in
-  *@sha256:*) ;;
-  *)
-    echo "ERROR: APP_IMAGE must be pinned by digest (@sha256:...)." >&2
-    exit 3
-    ;;
-esac
+if [[ ! "$APP_IMAGE" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]]; then
+  echo "ERROR: APP_IMAGE requires a valid image reference and exact 64-hex SHA256." >&2
+  exit 3
+fi
+
+if (( ${#PORT_NS} > 63 )) || [[ ! "$PORT_NS" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+  echo "ERROR: PORT_NS must be a DNS-1123 label, length 1..63." >&2
+  exit 6
+fi
 
 for cmd in oc sha256sum date git; do
   command -v "$cmd" >/dev/null 2>&1 || {
@@ -43,6 +45,27 @@ for cmd in oc sha256sum date git; do
   }
 done
 
+SOURCE_SHA="$(git rev-parse --verify HEAD 2>/dev/null)" || {
+  echo "ERROR: exact Git HEAD unavailable." >&2
+  exit 7
+}
+if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "ERROR: exact 40-hex Git HEAD required." >&2
+  exit 7
+fi
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)" || exit 7
+CALLER_ROOT="$(git rev-parse --show-toplevel)" || exit 7
+SCRIPT_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || exit 7
+if [ "$CALLER_ROOT" != "$SCRIPT_ROOT" ]; then
+  echo "ERROR: run from the script's Git repository." >&2
+  exit 7
+fi
+DIRTY="$(git status --porcelain --untracked-files=normal)" || exit 7
+if [ -n "$DIRTY" ]; then
+  echo "ERROR: dirty worktree; commit/review inputs before running." >&2
+  exit 8
+fi
+
 TS="$(date +%Y%m%dT%H%M%S%z)"
 if [ -z "$OUT_DIR" ]; then
   OUT_DIR="./evidence-local/p2-portability-w0/${TS}"
@@ -50,7 +73,6 @@ fi
 mkdir -p "$OUT_DIR" || exit 5
 chmod 700 "$OUT_DIR" 2>/dev/null || true
 
-SOURCE_SHA="$(git rev-parse HEAD 2>/dev/null || printf 'UNKNOWN')"
 
 {
   echo "=== CONTEXT ==="
@@ -173,7 +195,8 @@ set -e 2>/dev/null || true
   if [ "$FIXED_RC" -eq 0 ]; then
     echo "FIXED_UID_ADMISSION=PASS"
   else
-    echo "FIXED_UID_ADMISSION=REJECTED"
+    echo "FIXED_UID_ADMISSION=NOT_ACCEPTED"
+    echo "FIXED_UID_FAILURE_CLASS=INSPECT_RAW_ERROR_NOT_ASSUMED_SCC"
   fi
 
   if [ "$PORTABLE_RC" -eq 0 ]; then
