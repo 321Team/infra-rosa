@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-set -u
-set -o pipefail
+set -euo pipefail
+umask 077
 
 usage() {
   cat <<'EOF'
 Usage:
   PORT_NS=<approved-shared-ocp-namespace> \
+  OC_CONTEXT=<approved-context> EXPECTED_API_SERVER=https://<approved-api> \
+  PORT_ENV=SHARED_OCP_LAB \
   APP_IMAGE=<approved-image@sha256:...> \
   ./precheck/portability/uid-scc-admission.sh
 
@@ -38,7 +40,14 @@ if (( ${#PORT_NS} > 63 )) || [[ ! "$PORT_NS" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ 
   exit 6
 fi
 
-for cmd in oc sha256sum date git; do
+OC_CONTEXT="${OC_CONTEXT:-}"
+EXPECTED_API_SERVER="${EXPECTED_API_SERVER:-}"
+PORT_ENV="${PORT_ENV:-}"
+if [[ -z "$OC_CONTEXT" || ! "$EXPECTED_API_SERVER" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || [[ "$PORT_ENV" != SHARED_OCP_LAB && "$PORT_ENV" != ROSA ]]; then
+  echo 'ERROR: OC_CONTEXT, HTTPS EXPECTED_API_SERVER and PORT_ENV=SHARED_OCP_LAB|ROSA required.' >&2
+  exit 11
+fi
+for cmd in oc sha256sum date git mktemp; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "ERROR: required command not found: $cmd" >&2
     exit 4
@@ -78,39 +87,37 @@ if [ -n "$DIRTY" ]; then
   exit 8
 fi
 
-TS="$(date +%Y%m%dT%H%M%S%z)"
+# Pin every authenticated request; never inherit mutable current-context/server.
+OC=(oc --context="$OC_CONTEXT" --server="$EXPECTED_API_SERVER" --insecure-skip-tls-verify=false)
 if [ -z "$OUT_DIR" ]; then
-  OUT_DIR="./evidence-local/p2-portability-w0/${TS}"
+  mkdir -p ./evidence-local/p2-portability-w0
+  OUT_DIR="$(mktemp -d ./evidence-local/p2-portability-w0/capture.XXXXXX)" || exit 5
+else
+  # Atomic creation; any existing path (including symlink) is refused.
+  mkdir -m 700 -- "$OUT_DIR" || exit 5
 fi
-mkdir -p "$OUT_DIR" || exit 5
-chmod 700 "$OUT_DIR" 2>/dev/null || true
-
-
+chmod 700 -- "$OUT_DIR" || exit 5
+OUT_DIR="$(cd -- "$OUT_DIR" && pwd -P)"
+trap 'rc=$?; echo "CAPTURE_INCOMPLETE RC=$rc; preserve $OUT_DIR" >&2; exit "$rc"' ERR
+NS_UID="$("${OC[@]}" get namespace "$PORT_NS" -o jsonpath='{.metadata.uid}')" || exit 10
+[[ -n "$NS_UID" ]] || exit 10
 {
-  echo "=== CONTEXT ==="
-  date --iso-8601=seconds
+  echo "ENV=$PORT_ENV"
+  echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "KST=$(TZ=Asia/Seoul date +%Y-%m-%dT%H:%M:%S%z)"
   echo "SOURCE_SHA=$SOURCE_SHA"
+  echo "OC_CONTEXT=$OC_CONTEXT"
+  echo "API_SERVER=$EXPECTED_API_SERVER"
   echo "PORT_NS=$PORT_NS"
-  echo "APP_IMAGE_DIGEST=${APP_IMAGE##*@}"
-  echo
-  echo "=== OC CLIENT/SERVER ==="
-  oc version || true
-  echo
-  echo "=== NAMESPACE ==="
-  oc get namespace "$PORT_NS" -o name
-  echo "NS_RC=$?"
-  echo
-  echo "=== UID RANGE ==="
-  oc get namespace "$PORT_NS" -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.uid-range}{"\n"}' || true
-  echo "=== SUPPLEMENTAL GROUP RANGE ==="
-  oc get namespace "$PORT_NS" -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.supplemental-groups}{"\n"}' || true
+  echo "NAMESPACE_UID=$NS_UID"
+  echo "APP_IMAGE=$APP_IMAGE"
+  echo "=== EXECUTION IDENTITY ==="
+  "${OC[@]}" whoami
+  echo "=== CLIENT/SERVER ==="
+  "${OC[@]}" version
+  echo "=== UID/GROUP RANGES ==="
+  "${OC[@]}" get namespace "$PORT_NS" -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.uid-range}{"\n"}{.metadata.annotations.openshift\.io/sa\.scc\.supplemental-groups}{"\n"}'
 } >"$OUT_DIR/context.txt" 2>&1
-
-if ! oc get namespace "$PORT_NS" >/dev/null 2>&1; then
-  echo "ERROR: namespace not accessible: $PORT_NS" >&2
-  echo "RESULT=BLOCKED_NAMESPACE_ACCESS" >"$OUT_DIR/result.txt"
-  exit 10
-fi
 
 render_fixed() {
   cat <<EOF
@@ -187,15 +194,23 @@ EOF
 render_fixed >"$OUT_DIR/fixed-uid-pod.yaml"
 render_portable >"$OUT_DIR/portable-uid-pod.yaml"
 
-sha256sum   "$OUT_DIR/fixed-uid-pod.yaml"   "$OUT_DIR/portable-uid-pod.yaml"   >"$OUT_DIR/MANIFEST_SHA256SUMS.txt"
+(cd "$OUT_DIR" && sha256sum fixed-uid-pod.yaml portable-uid-pod.yaml > MANIFEST_SHA256SUMS.txt)
 
-set +e
-oc create --dry-run=server -f "$OUT_DIR/fixed-uid-pod.yaml" -o yaml   >"$OUT_DIR/t1-fixed-uid.stdout.yaml"   2>"$OUT_DIR/t1-fixed-uid.stderr.txt"
-FIXED_RC=$?
+exec 3>"$OUT_DIR/t1-fixed-uid.stdout.yaml" 4>"$OUT_DIR/t1-fixed-uid.stderr.txt"
+FIXED_RC=0
+"${OC[@]}" create --dry-run=server -f "$OUT_DIR/fixed-uid-pod.yaml" -o yaml   >&3 2>&4 || FIXED_RC=$?
 
-oc create --dry-run=server -f "$OUT_DIR/portable-uid-pod.yaml" -o yaml   >"$OUT_DIR/t2-portable-uid.stdout.yaml"   2>"$OUT_DIR/t2-portable-uid.stderr.txt"
-PORTABLE_RC=$?
-set -e 2>/dev/null || true
+exec 3>&- 4>&-
+exec 3>"$OUT_DIR/t2-portable-uid.stdout.yaml" 4>"$OUT_DIR/t2-portable-uid.stderr.txt"
+PORTABLE_RC=0
+"${OC[@]}" create --dry-run=server -f "$OUT_DIR/portable-uid-pod.yaml" -o yaml   >&3 2>&4 || PORTABLE_RC=$?
+exec 3>&- 4>&-
+# Redirection/IO failures must not become a successful capture.
+for f in t1-fixed-uid.stdout.yaml t1-fixed-uid.stderr.txt t2-portable-uid.stdout.yaml t2-portable-uid.stderr.txt; do
+  [[ -f "$OUT_DIR/$f" ]] || exit 12
+done
+FINAL_NS_UID="$("${OC[@]}" get namespace "$PORT_NS" -o jsonpath='{.metadata.uid}')" || exit 10
+[[ "$NS_UID" == "$FINAL_NS_UID" ]] || { echo "STOP: namespace identity changed" >&2; exit 13; }
 
 {
   echo "SOURCE_SHA=$SOURCE_SHA"
@@ -222,7 +237,9 @@ set -e 2>/dev/null || true
   echo "CLUSTER_MUTATION=NONE_DRY_RUN_SERVER"
   echo "RUNTIME=NOT_RUN"
   echo "PG03=PARTIAL_ONLY"
-} | tee "$OUT_DIR/result.txt"
+} > "$OUT_DIR/result.txt"
+(cd "$OUT_DIR" && sha256sum context.txt fixed-uid-pod.yaml portable-uid-pod.yaml MANIFEST_SHA256SUMS.txt t1-fixed-uid.stdout.yaml t1-fixed-uid.stderr.txt t2-portable-uid.stdout.yaml t2-portable-uid.stderr.txt result.txt > SHA256SUMS && sha256sum SHA256SUMS > SHA256SUMS.sha256 && sha256sum -c SHA256SUMS >/dev/null)
+cat "$OUT_DIR/result.txt"
 
 echo "EVIDENCE_DIR=$OUT_DIR"
 

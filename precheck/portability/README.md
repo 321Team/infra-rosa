@@ -37,12 +37,16 @@ Phase 1의 고정 UID/GID SecurityContext가 OpenShift/ROSA의 기본 SCC 경계
 1. Shared OCP 로그인 완료
 2. 승인된 Team Namespace
 3. 승인 image digest
+4. OC_CONTEXT, EXPECTED_API_SERVER(HTTPS endpoint), PORT_ENV=SHARED_OCP_LAB 또는 ROSA
 
 이미지는 mutable tag를 받지 않는다.
 
 예:
 
 ```bash
+export OC_CONTEXT='APPROVED_CONTEXT'
+export EXPECTED_API_SERVER='https://APPROVED_API:6443'
+export PORT_ENV='SHARED_OCP_LAB'
 export PORT_NS='j1-fds-app'
 export APP_IMAGE='registry.example.invalid/fds/transaction-api@sha256:<approved-digest>'
 ```
@@ -64,7 +68,7 @@ bash precheck/portability/uid-scc-admission.sh
 기본 증적 경로:
 
 ```text
-./evidence-local/p2-portability-w0/<timestamp>/
+./evidence-local/p2-portability-w0/capture.<unique>/
 ```
 
 이 경로의 원본은 로컬 수집물이며 비밀정보 포함 여부를 확인하기 전 Git에 커밋하지 않는다.
@@ -143,4 +147,13 @@ PR 병합 또는 실제 Shared OCP 실행은 각각 별도 단계로 판단한�
 
 `bash precheck/portability/tests/input-contract.sh`는 임시 로컬 Git fixture와 oc mock으로 malformed image/namespace, non-repo/dirty source를 검증한다. 실제 cluster 연결/변경 없음. 실행은 Bash/git/sha256sum 기준이며 10 fault cases (ignored copy 포함)와 dry-run-only 두 요청을 확인한다. 이 결과는 MOCK이며 SCC/Runtime PASS가 아니다.
 
-PG-03 Runtime은 [current architecture candidate](https://github.com/321Team/fds-project-architecture/pull/8) §6을 따른다. 실제 approved image/namespace/source에서 restricted-v2 arbitrary UID로 Running/Ready/health/imageID/RO filesystem과 필수 volume 접근/cleanup을 검증한다. 고정 UID 제거 admission PASS만으로 PG03 PASS 처리하지 않는다. Custom/broad SCC 우회 금지. 현 script는 admission-only이며 Runtime Pod 생성은 수행하지 않는다.
+PG-03 Runtime은 [current private architecture candidate](https://github.com/321Team/fds-project-baseline/pull/137)의 플랫폼·이미지 handoff 계약을 따른다. 실제 approved image/namespace/source에서 restricted-v2 arbitrary UID로 Running/Ready/health/imageID/RO filesystem과 필수 volume 접근/cleanup을 검증한다. 고정 UID 제거 admission PASS만으로 PG03 PASS 처리하지 않는다. Custom/broad SCC 우회 금지. 현 script는 admission-only이며 Runtime Pod 생성은 수행하지 않는다.
+
+## 2026-10-05 증적 보존·대상 고정 보완
+기존 architecture PR8은 종료된 역사 출처이며 현행 입력은 private baseline PR137이다.
+- OUT_DIR 지정 시 부모 디렉터리는 미리 존재해야 하며 최종 경로가 이미 있으면 RC5로 중단한다. 기본 경로는 mktemp로 배타적으로 생성한다. 기존 결과를 덮어쓰지 않는다.
+- 모든 인증 oc 요청은 명시 context/server와 TLS 검증 사용. namespace UID를 시작/종료에 비교하고 identity/UTC/KST/environment를 기록한다. token/kubeconfig 원문은 저장하지 않는다. 같은 endpoint 자체가 다른 cluster로 교체되는 상황까지 방지하는 cryptographic cluster attestation은 아니다.
+- SHA256SUMS는 context, 입력, raw stdout/stderr, result 및 기존 입력 해시를 모두 상대경로로 포함한다. SHA256SUMS.sha256는 목록 자체 해시다. 둘을 별도 수신·보관하여 대조하며, 동일 폴더의 해시만으로 서명/변조 방지를 주장하지 않는다.
+- 파일 생성/필수 context 조회/해시 실패는 중단한다. 성공 결과는 최종 해시 검증 후 stdout에 출력한다. 중단된 디렉터리는 불완전 수집물로 보존하고 새 경로에서 원인을 해결한 뒤 재수집한다.
+- RC11=대상 입력 부적합, RC12=필수 raw 파일 부재, RC13=namespace identity 변경. 기타 필수 명령 오류는 해당 nonzero RC로 종료한다.
+- MOCK: 기존 10 input cases 및 dry-run2, 경로 재사용 거부·원본 보존, raw 변조 검출, context/API 입력 거부, 해시 실패 시 성공 출력 없음 확인. 실제 Shared OCP/ROSA 접속·Runtime·PG03 인수는 미수행이다.
