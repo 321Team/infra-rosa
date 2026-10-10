@@ -157,3 +157,12 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
 - 파일 생성/필수 context 조회/해시 실패는 중단한다. 성공 결과는 최종 해시 검증 후 stdout에 출력한다. 중단된 디렉터리는 불완전 수집물로 보존하고 새 경로에서 원인을 해결한 뒤 재수집한다.
 - RC11=대상 입력 부적합, RC12=필수 raw 파일 부재, RC13=namespace identity 변경. 기타 필수 명령 오류는 해당 nonzero RC로 종료한다.
 - MOCK: 기존 10 input cases 및 dry-run2, 경로 재사용 거부·원본 보존, raw 변조 검출, context/API 입력 거부, 해시 실패 시 성공 출력 없음 확인. 실제 Shared OCP/ROSA 접속·Runtime·PG03 인수는 미수행이다.
+
+## 2026-10-10 infra-rosa#6 PG-03 실제 manifest 검사 (`pg03-rosa-check.sh`, 초안)
+
+계획: [#6 댓글 6096647524](https://github.com/321Team/infra-rosa/issues/6#issuecomment-6096647524). 위 W0 스크립트는 일반 Pod 하나로 검사합니다. 이 스크립트는 fds-msa `deploy/base` 실제 manifest(clean checkout, `MSA_SHA` 고정)를 씁니다.
+
+- `MODE=admission`: 조회 전용입니다. 고정 UID 버전(T1)과 portable 버전(T2)을 렌더해 `oc adm policy scc-subject-review`로 어떤 SCC가 받아주는지 기록합니다. Deployment server dry-run은 SCC를 평가하지 않기 때문입니다. 클러스터는 변경하지 않습니다.
+- `MODE=runtime`: 클러스터를 변경합니다. `PG03_RUNTIME_GO=yes`가 있어야 실행됩니다. portable 렌더(replicas 1, Route·lab-db 없음)를 apply하고 SCC 주석, UID/GID, imageID, 읽기 전용 루트, `/livez`·`/readyz`를 확인한 뒤 삭제하고 잔여가 없는지 확인합니다. transaction-api는 연결되지 않는 더미 `DATABASE_URL`로 시작만 확인하고, Ready 판정은 #43 lab-db 범위로 넘깁니다. namespace는 지우지 않습니다(#5 소유).
+- fds-msa는 수정하지 않습니다. 임시 overlay는 증적 폴더 안에 만듭니다.
+- 상태: STATIC(`bash -n`)만 확인했습니다. MOCK·CI·SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
