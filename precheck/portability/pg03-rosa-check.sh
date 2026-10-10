@@ -1,107 +1,124 @@
 #!/usr/bin/env bash
-# infra-rosa#6 PG-03 — ROSA restricted-v2 portable SecurityContext 재검증 수집기 (초안 v1)
+# infra-rosa#6 PG-03 — ROSA restricted-v2 SCC admission 수집기 (v2, admission 전용)
 #
-# MODE=admission  읽기 전용. fds-msa 실제 manifest를 고정 UID(T1) / portable(T2) 두 벌로 렌더하고
-#                 oc adm policy scc-subject-review 로 어떤 SCC가 받아주는지 기록한다. 클러스터 변경 없음.
-# MODE=runtime    변경 있음(별도 GO 필요). portable 렌더(replicas 1, Route 없음)를 지정 namespace에
-#                 apply → UID/GID·SCC·imageID·RO 루트·liveness/Ready 확인 → 삭제·잔여 확인.
+# 하는 일(클러스터 변경 없음, 조회만):
+#   fds-msa deploy/base 실제 manifest를 portable(T2, UID 고정 없음)과 fixed(T1, Phase 1 UID/GID)로 렌더한다.
+#   렌더 결과에서 Deployment 2개만 골라, 각 Deployment의 앱 ServiceAccount 단독 주체(-z)로
+#   `oc adm policy scc-subject-review`를 돌리고 allowedBy SCC를 구조적으로 판정한다.
 #
-# 비용: admission은 조회만이라 추가 비용 없음. runtime은 이미 떠 있는 Worker에 Pod 4개를 잠깐 올리며
-#       새 AWS 리소스를 만들지 않는다. 비용 판정은 이권욱 소관.
+# 하지 않는 것: apply/create/delete/label/patch/exec 등 모든 쓰기. Runtime(실제 Pod 기동) 시험은
+#   소유권 장부·정리 설계 후 별도 PR에서 다룬다(PR36 리뷰 B1/B2). MODE=runtime은 입력 단계에서 거부한다.
+#
+# 결과는 admission 참고 근거다. 실제 SCC annotation/UID/기동 확인을 대체하지 않으며 PG03 PASS가 아니다.
 #
 # 입력(모두 필수):
-#   CTX, API(https://...), NS, PORT_ENV=ROSA|SHARED_OCP_LAB
+#   CTX, API(https://host[:port]), NS, PORT_ENV=ROSA|SHARED_OCP_LAB
+#   EXPECTED_CLUSTER_ID, EXPECTED_NS_UID   승인된 inventory 값(UUID)
 #   MSA_DIR  fds-msa clean checkout,  MSA_SHA  기대 40-hex HEAD
 #   TX_IMAGE, ENG_IMAGE  <registry>/<repo>@sha256:<64hex>
-# 선택: PULL_SECRET_NAME(namespace에 미리 만든 pull secret 이름), OUT_DIR
+# 선택: OUT_DIR(없어야 함)
+#
+# 종료 코드:
+#   0  portable 2건 모두 restricted-v2, fixed 2건 모두 거부(allowedBy 없음)
+#   2  입력 오류(oc 호출 전)          10 대상 불일치(서버/Cluster ID/NS UID)
+#   11 수집·파싱 오류(렌더, 변환, 리뷰 rc≠0, 대상 누락, SA 조회 오류)
+#   20 portable이 restricted-v2가 아님(거부 또는 더 넓은 SCC)
+#   21 fixed가 예상과 달리 허용됨(restricted-v2 또는 더 넓은 SCC)
 set -euo pipefail
 umask 077
 
-die() { echo "STOP: $*" >&2; exit 1; }
+die() { local rc="$1"; shift; echo "STOP: $*" >&2; exit "$rc"; }
 
-MODE="${MODE:-}"; CTX="${CTX:-}"; API="${API:-}"; NS="${NS:-}"; PORT_ENV="${PORT_ENV:-}"
+MODE="${MODE:-admission}"; CTX="${CTX:-}"; API="${API:-}"; NS="${NS:-}"; PORT_ENV="${PORT_ENV:-}"
+EXPECTED_CLUSTER_ID="${EXPECTED_CLUSTER_ID:-}"; EXPECTED_NS_UID="${EXPECTED_NS_UID:-}"
 MSA_DIR="${MSA_DIR:-}"; MSA_SHA="${MSA_SHA:-}"; TX_IMAGE="${TX_IMAGE:-}"; ENG_IMAGE="${ENG_IMAGE:-}"
-PULL_SECRET_NAME="${PULL_SECRET_NAME:-}"; OUT_DIR="${OUT_DIR:-}"
+OUT_DIR="${OUT_DIR:-}"
 
-[[ "$MODE" == admission || "$MODE" == runtime ]] || die "MODE=admission|runtime"
-[[ -n "$CTX" ]] || die "CTX 필요"
-[[ "$API" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die "API는 https://host[:port]"
-[[ "$PORT_ENV" == ROSA || "$PORT_ENV" == SHARED_OCP_LAB ]] || die "PORT_ENV=ROSA|SHARED_OCP_LAB"
-(( ${#NS} <= 63 )) && [[ "$NS" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die "NS는 DNS-1123 label"
+# ---- 입력 검사 (oc 호출 전) ----
+[[ "$MODE" == admission ]] || die 2 "MODE=admission만 지원(runtime은 HOLD: 소유권·정리 재설계 후 별도 PR)"
+[[ -n "$CTX" && "$CTX" != *$'\n'* ]] || die 2 "CTX 필요"
+[[ "$API" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || die 2 "API는 https://host[:port]"
+[[ "$PORT_ENV" == ROSA || "$PORT_ENV" == SHARED_OCP_LAB ]] || die 2 "PORT_ENV=ROSA|SHARED_OCP_LAB"
+(( ${#NS} <= 63 )) && [[ "$NS" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] || die 2 "NS는 DNS-1123 label"
+[[ ! "$NS" =~ ^(openshift|kube)(-|$) && "$NS" != default ]] || die 2 "System namespace는 대상 아님"
+UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+[[ "$EXPECTED_CLUSTER_ID" =~ $UUID_RE ]] || die 2 "EXPECTED_CLUSTER_ID는 승인 inventory의 UUID"
+[[ "$EXPECTED_NS_UID" =~ $UUID_RE ]] || die 2 "EXPECTED_NS_UID는 승인 inventory의 UUID"
 IMG_RE='^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$'
-[[ "$TX_IMAGE" =~ $IMG_RE && "$ENG_IMAGE" =~ $IMG_RE ]] || die "TX_IMAGE/ENG_IMAGE는 @sha256:<64hex> 고정"
-[[ -z "$PULL_SECRET_NAME" || "$PULL_SECRET_NAME" =~ ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]] || die "PULL_SECRET_NAME 형식"
-[[ "$MSA_SHA" =~ ^[0-9a-f]{40}$ ]] || die "MSA_SHA는 40-hex"
-for c in oc git sha256sum date mktemp realpath; do command -v "$c" >/dev/null || die "명령 없음: $c"; done
+[[ "$TX_IMAGE" =~ $IMG_RE && "$ENG_IMAGE" =~ $IMG_RE ]] || die 2 "TX_IMAGE/ENG_IMAGE는 @sha256:<64hex> 고정"
+[[ "$MSA_SHA" =~ ^[0-9a-f]{40}$ ]] || die 2 "MSA_SHA는 40-hex"
+for c in oc git python3 sha256sum date mktemp realpath; do command -v "$c" >/dev/null || die 2 "명령 없음: $c"; done
 
 # fds-msa source 고정: 지정 SHA + clean worktree
-[[ -d "$MSA_DIR/deploy/base" ]] || die "MSA_DIR/deploy/base 없음"
-[[ "$(git -C "$MSA_DIR" rev-parse --verify HEAD)" == "$MSA_SHA" ]] || die "fds-msa HEAD != MSA_SHA"
-[[ -z "$(git -C "$MSA_DIR" status --porcelain --untracked-files=normal)" ]] || die "fds-msa worktree dirty"
+[[ -d "$MSA_DIR/deploy/base" ]] || die 2 "MSA_DIR/deploy/base 없음"
+[[ "$(git -C "$MSA_DIR" rev-parse --verify HEAD)" == "$MSA_SHA" ]] || die 2 "fds-msa HEAD != MSA_SHA"
+[[ -z "$(git -C "$MSA_DIR" status --porcelain --untracked-files=normal)" ]] || die 2 "fds-msa worktree dirty"
 MSA_DIR="$(realpath "$MSA_DIR")"
 
-OC=(oc --context="$CTX" --server="$API" --insecure-skip-tls-verify=false)
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+SELF_SHA="$(sha256sum "$SELF" | cut -d' ' -f1)"
 
 if [[ -z "$OUT_DIR" ]]; then
   mkdir -p ./evidence-local/pg03
-  OUT_DIR="$(mktemp -d "./evidence-local/pg03/${MODE}.XXXXXX")"
+  OUT_DIR="$(mktemp -d "./evidence-local/pg03/admission.XXXXXX")"
 else
-  mkdir -m 700 -- "$OUT_DIR" || die "OUT_DIR 이미 있음/생성 실패(덮어쓰지 않음)"
+  mkdir -m 700 -- "$OUT_DIR" 2>/dev/null || die 2 "OUT_DIR 이미 있음/생성 실패(덮어쓰지 않음)"
 fi
 OUT_DIR="$(realpath "$OUT_DIR")"
-trap 'rc=$?; [[ $rc -ne 0 ]] && echo "CAPTURE_INCOMPLETE RC=$rc; 보존: $OUT_DIR" >&2' EXIT
+trap 'rc=$?; [[ $rc -ne 0 ]] && echo "RESULT_RC=$rc; 보존: $OUT_DIR" >&2' EXIT
 
-# 명령 하나를 rc·stdout·stderr 파일로 남긴다. 실패해도 계속하고 rc로 판정한다.
+# 명령 하나를 시각·rc·stdout·stderr로 남긴다. 판정은 rc와 내용으로 한다.
 run() {
   local name="$1"; shift
+  local start; start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   set +e
   "$@" >"$OUT_DIR/$name.out" 2>"$OUT_DIR/$name.err"
-  echo $? >"$OUT_DIR/$name.rc"
+  local rc=$?
   set -e
+  echo "$rc" >"$OUT_DIR/$name.rc"
+  printf '%s\t%s\t%s\t%s\n' "$start" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rc" "$name" >>"$OUT_DIR/commands.tsv"
   return 0
 }
 rc_of() { cat "$OUT_DIR/$1.rc"; }
 
-# ---- 대상 확인 ----
-NS_UID="$("${OC[@]}" get namespace "$NS" -o jsonpath='{.metadata.uid}')" || die "namespace 조회 실패"
-[[ -n "$NS_UID" ]] || die "namespace UID 비어 있음"
-{
-  echo "ENV=$PORT_ENV"; echo "MODE=$MODE"
-  echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "KST=$(TZ=Asia/Seoul date +%Y-%m-%dT%H:%M:%S%z)"
-  echo "CTX=$CTX"; echo "API=$API"; echo "NS=$NS"; echo "NAMESPACE_UID=$NS_UID"
-  echo "MSA_SHA=$MSA_SHA"; echo "TX_IMAGE=$TX_IMAGE"; echo "ENG_IMAGE=$ENG_IMAGE"
-  echo "PULL_SECRET_NAME=${PULL_SECRET_NAME:-<none>}"
-  echo "=== whoami ==="; "${OC[@]}" whoami
-  echo "=== version ==="; "${OC[@]}" version
-  echo "=== cluster id ==="; "${OC[@]}" get clusterversion version -o jsonpath='{.spec.clusterID}{"\n"}' 2>&1 || true
-  echo "=== ns scc annotations (uid-range / supplemental-groups) ==="
-  "${OC[@]}" get namespace "$NS" -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.uid-range}{"\n"}{.metadata.annotations.openshift\.io/sa\.scc\.supplemental-groups}{"\n"}'
-} >"$OUT_DIR/context.txt" 2>&1
+# ---- 대상 확인: kubeconfig context의 서버가 API와 같은지 먼저(로컬 조회, API 요청 없음) ----
+run ctx-server oc config view --minify --context="$CTX" -o 'jsonpath={.clusters[0].cluster.server}'
+[[ "$(rc_of ctx-server)" == 0 && "$(cat "$OUT_DIR/ctx-server.out")" == "$API" ]] \
+  || die 10 "CTX의 서버가 API와 다름(첫 API 요청 전 중단)"
 
-# ---- 렌더: fds-msa base를 가리키는 임시 overlay 2벌 ----
+OC=(oc --context="$CTX" --server="$API" --insecure-skip-tls-verify=false)
+
+run cluster-id "${OC[@]}" get clusterversion version -o 'jsonpath={.spec.clusterID}'
+[[ "$(rc_of cluster-id)" == 0 && "$(cat "$OUT_DIR/cluster-id.out")" == "$EXPECTED_CLUSTER_ID" ]] \
+  || die 10 "Cluster ID가 승인 inventory와 다르거나 조회 불가(cluster-id.err 확인)"
+run ns-uid "${OC[@]}" get namespace "$NS" -o 'jsonpath={.metadata.uid}'
+[[ "$(rc_of ns-uid)" == 0 && "$(cat "$OUT_DIR/ns-uid.out")" == "$EXPECTED_NS_UID" ]] \
+  || die 10 "Namespace UID가 승인 inventory와 다르거나 조회 불가"
+
+run whoami "${OC[@]}" whoami
+run oc-version "${OC[@]}" version
+run ns-scc-annotations "${OC[@]}" get namespace "$NS" -o \
+  'jsonpath={.metadata.annotations.openshift\.io/sa\.scc\.uid-range}{"\n"}{.metadata.annotations.openshift\.io/sa\.scc\.supplemental-groups}{"\n"}'
+{
+  echo "ENV=$PORT_ENV"; echo "MODE=admission"
+  echo "UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; echo "KST=$(TZ=Asia/Seoul date +%Y-%m-%dT%H:%M:%S%z)"
+  echo "CTX=$CTX"; echo "API=$API"; echo "CLUSTER_ID=$EXPECTED_CLUSTER_ID"
+  echo "NS=$NS"; echo "NAMESPACE_UID=$EXPECTED_NS_UID"
+  echo "MSA_SHA=$MSA_SHA"; echo "TX_IMAGE=$TX_IMAGE"; echo "ENG_IMAGE=$ENG_IMAGE"
+  echo "COLLECTOR_SHA256=$SELF_SHA"
+  echo "COLLECTOR_GIT_HEAD=$(git -C "$(dirname "$SELF")" rev-parse HEAD 2>/dev/null || echo unknown)"
+  echo "WHOAMI_RC=$(rc_of whoami) WHOAMI=$(cat "$OUT_DIR/whoami.out")"
+} >"$OUT_DIR/context.txt"
+
+# ---- 렌더: fds-msa base를 가리키는 임시 overlay 2벌(라벨 추가 없음) ----
 mkdir -p "$OUT_DIR/portable" "$OUT_DIR/fixed"
 REL_BASE="$(realpath -m --relative-to="$OUT_DIR/portable" "$MSA_DIR/deploy/base")"
-
-PULL_PATCH=""
-if [[ -n "$PULL_SECRET_NAME" ]]; then
-  PULL_PATCH="  - target:
-      kind: Deployment
-    patch: |-
-      - op: add
-        path: /spec/template/spec/imagePullSecrets
-        value:
-          - name: ${PULL_SECRET_NAME}"
-fi
-
-# portable = base 그대로(UID/GID 없음) + namespace + digest + replicas 1. Route·lab-db 없음.
 cat >"$OUT_DIR/portable/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: ${NS}
 resources:
   - ${REL_BASE}
-commonLabels:
-  fds.321team/probe: pg03
 images:
   - name: transaction-api
     newName: ${TX_IMAGE%@*}
@@ -109,16 +126,7 @@ images:
   - name: fds-engine
     newName: ${ENG_IMAGE%@*}
     digest: ${ENG_IMAGE##*@}
-patches:
-  - target:
-      kind: Deployment
-    patch: |-
-      - op: replace
-        path: /spec/replicas
-        value: 1
-${PULL_PATCH}
 EOF
-
 # fixed = portable + Phase 1 고정값(fds-msa deploy/overlays/p1-onprem/deployment-p1.yaml 의 UID/GID만)
 cat >"$OUT_DIR/fixed/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -137,112 +145,123 @@ patches:
         value: 999
 EOF
 
-run render-portable "${OC[@]:0:1}" kustomize "$OUT_DIR/portable"
-run render-fixed    "${OC[@]:0:1}" kustomize "$OUT_DIR/fixed"
-[[ "$(rc_of render-portable)" == 0 && "$(rc_of render-fixed)" == 0 ]] || die "kustomize 렌더 실패(*.err 확인)"
-cp "$OUT_DIR/render-portable.out" "$OUT_DIR/rendered-portable.yaml"
-cp "$OUT_DIR/render-fixed.out"    "$OUT_DIR/rendered-fixed.yaml"
-grep -q 'runAsUser' "$OUT_DIR/rendered-portable.yaml" && die "portable 렌더에 runAsUser가 있음"
-[[ "$(grep -c 'runAsUser: 10001' "$OUT_DIR/rendered-fixed.yaml")" == 2 ]] || die "fixed 렌더에 고정 UID 2건이 아님"
-
-# ---- admission (읽기 전용) ----
-# Deployment의 server dry-run은 SCC를 거치지 않는다(SCC는 Pod 생성 때 평가).
-# 그래서 Pod 템플릿을 scc-subject-review로 평가한다. 결과의 allowedBy가 SCC 이름 또는 <none>.
-for v in fixed portable; do
-  run "t-${v}-scc-subject-review" "${OC[@]}" -n "$NS" adm policy scc-subject-review -f "$OUT_DIR/rendered-${v}.yaml"
+for v in portable fixed; do
+  run "render-$v" oc kustomize "$OUT_DIR/$v"
+  [[ "$(rc_of "render-$v")" == 0 ]] || die 11 "kustomize 렌더 실패($v)"
+  # 렌더 YAML → JSON. client dry-run이라 서버에 쓰지 않는다(리소스 매핑 조회만).
+  run "json-$v" "${OC[@]}" create --dry-run=client -o json -f "$OUT_DIR/render-$v.out"
+  [[ "$(rc_of "json-$v")" == 0 ]] || die 11 "렌더 JSON 변환 실패($v)"
 done
 
-{
-  echo "MSA_SHA=$MSA_SHA"; echo "NS=$NS"; echo "ENV=$PORT_ENV"
-  for v in fixed portable; do
-    echo "T_${v^^}_REVIEW_RC=$(rc_of "t-${v}-scc-subject-review")"
-    echo "--- T_${v^^} allowedBy (raw) ---"
-    cat "$OUT_DIR/t-${v}-scc-subject-review.out"
-  done
-  echo "기대: FIXED → restricted-v2 아님(<none> 또는 더 넓은 SCC), PORTABLE → restricted-v2"
-  echo "판정은 사람이 raw를 보고 내린다. 이 파일은 판정이 아니다."
-} >"$OUT_DIR/admission-result.txt"
+# Deployment만 추출(SA/Service/NetworkPolicy는 Pod template이 없어 리뷰 대상이 아님).
+python3 - "$OUT_DIR" "$NS" <<'PY' || die 11 "Deployment 추출 실패(대상 2건 아님 또는 형식 오류)"
+import json, sys, os
+out, ns = sys.argv[1], sys.argv[2]
+EXPECT = {'fds-engine': 'fds-engine-sa', 'transaction-api': 'transaction-api-sa'}
+targets = []
+for v in ('portable', 'fixed'):
+    doc = json.load(open(os.path.join(out, f'json-{v}.out')))
+    items = doc['items'] if doc.get('kind') == 'List' else [doc]
+    deps = [i for i in items if i.get('kind') == 'Deployment']
+    names = sorted(d['metadata']['name'] for d in deps)
+    assert names == sorted(EXPECT), names
+    for d in deps:
+        name = d['metadata']['name']
+        spec = d['spec']['template']['spec']
+        sc = spec.get('securityContext') or {}
+        assert d['metadata'].get('namespace') == ns
+        assert spec.get('serviceAccountName') == EXPECT[name]
+        if v == 'portable':
+            assert 'runAsUser' not in sc and 'runAsGroup' not in sc
+        else:
+            assert sc.get('runAsUser') == 10001 and sc.get('runAsGroup') == 999
+        path = os.path.join(out, f'deploy-{v}-{name}.json')
+        json.dump(d, open(path, 'w'), sort_keys=True)
+        targets.append(f'{v}\t{name}\t{EXPECT[name]}')
+open(os.path.join(out, 'targets.tsv'), 'w').write('\n'.join(targets) + '\n')
+PY
 
-if [[ "$MODE" == admission ]]; then
-  [[ "$("${OC[@]}" get namespace "$NS" -o jsonpath='{.metadata.uid}')" == "$NS_UID" ]] || die "namespace UID 변경"
-  echo "CLUSTER_MUTATION=NONE" >>"$OUT_DIR/admission-result.txt"
-  (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
-  cat "$OUT_DIR/admission-result.txt"; echo "EVIDENCE_DIR=$OUT_DIR"
-  exit 0
-fi
-
-# ---- runtime (변경 있음) ----
-[[ "${PG03_RUNTIME_GO:-}" == yes ]] || die "runtime은 PG03_RUNTIME_GO=yes(별도 GO 기록 후)일 때만"
-
-# transaction-api는 import 시 DATABASE_URL이 없으면 죽는다. 실제 DB가 아닌 연결 불가 더미값을 쓴다.
-# 이 Secret에는 credential이 없다. Ready(/readyz)는 DB가 필요하므로 #43 lab-db 범위로 넘긴다.
-run secret-get "${OC[@]}" -n "$NS" get secret transaction-api-db-credentials -o name
-[[ "$(rc_of secret-get)" != 0 ]] || die "transaction-api-db-credentials가 이미 있음 — 덮어쓰지 않음(#43 소유일 수 있음)"
-run secret-create "${OC[@]}" -n "$NS" create secret generic transaction-api-db-credentials \
-  --from-literal=DATABASE_URL='postgresql+asyncpg://pg03probe:unused@127.0.0.1:1/none'
-[[ "$(rc_of secret-create)" == 0 ]] || die "더미 Secret 생성 실패"
-run secret-label "${OC[@]}" -n "$NS" label secret transaction-api-db-credentials fds.321team/probe=pg03
-
-run apply "${OC[@]}" -n "$NS" apply -f "$OUT_DIR/rendered-portable.yaml"
-[[ "$(rc_of apply)" == 0 ]] || echo "WARN: apply rc=$(rc_of apply) — 정리 단계로 진행" >&2
-
-run rollout-engine "${OC[@]}" -n "$NS" rollout status deployment/fds-engine --timeout=300s
-# transaction-api는 Ready가 되지 않는 것이 정상(DB 없음). 컨테이너 시작까지만 기다린다.
-run wait-tx "${OC[@]}" -n "$NS" wait pod -l app=transaction-api --for=jsonpath='{.status.containerStatuses[0].started}'=true --timeout=300s
-
-run pods-yaml "${OC[@]}" -n "$NS" get pod -l fds.321team/probe=pg03 -o yaml
-run pods-summary "${OC[@]}" -n "$NS" get pod -l fds.321team/probe=pg03 -o \
-  jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.annotations.openshift\.io/scc}{"\t"}{.spec.securityContext.runAsUser}{"\t"}{.spec.securityContext.fsGroup}{"\t"}{.status.phase}{"\t"}{.status.containerStatuses[0].ready}{"\t"}{.status.containerStatuses[0].restartCount}{"\t"}{.status.containerStatuses[0].imageID}{"\n"}{end}'
-run events "${OC[@]}" -n "$NS" get events --sort-by=.lastTimestamp
-
-PY_CHECK='import os,urllib.request,sys
-print("uid",os.getuid(),"gid",os.getgid(),"groups",os.getgroups())
-for p in ("/app/.pg03-write-test","/tmp/.pg03-write-test"):
-    try:
-        open(p,"w").write("x"); print("WRITE_OK",p)
-    except OSError as e:
-        print("WRITE_DENIED",p,e.errno,e.strerror)
-port=sys.argv[1]
-for path in ("/livez","/readyz"):
-    try:
-        r=urllib.request.urlopen("http://127.0.0.1:"+port+path,timeout=5); print("HTTP",path,r.status)
-    except Exception as e:
-        print("HTTP",path,"ERR",getattr(e,"code",type(e).__name__))'
-for app_port in "fds-engine:8001" "transaction-api:8000"; do
-  app="${app_port%%:*}"; port="${app_port##*:}"
-  pod="$("${OC[@]}" -n "$NS" get pod -l "app=$app" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-  if [[ -n "$pod" ]]; then
-    run "exec-$app" "${OC[@]}" -n "$NS" exec "$pod" -- /venv/bin/python3 -c "$PY_CHECK" "$port"
-  else
-    echo "pod 없음" >"$OUT_DIR/exec-$app.err"; echo 99 >"$OUT_DIR/exec-$app.rc"
+# ---- 앱 SA 상태 기록: NotFound만 부재로 인정, 그 밖의 오류는 중단 ----
+for sa in fds-engine-sa transaction-api-sa; do
+  run "sa-$sa" "${OC[@]}" -n "$NS" get serviceaccount "$sa" -o 'jsonpath={.metadata.uid}'
+  if [[ "$(rc_of "sa-$sa")" != 0 ]] && ! grep -q 'NotFound' "$OUT_DIR/sa-$sa.err"; then
+    die 11 "SA 조회 오류($sa): NotFound가 아님(sa-$sa.err 확인)"
   fi
 done
 
-# ---- 정리 + 잔여 확인 (namespace는 #5 소유라 지우지 않는다) ----
-run delete "${OC[@]}" -n "$NS" delete -f "$OUT_DIR/rendered-portable.yaml" --wait=true --timeout=180s
-run delete-secret "${OC[@]}" -n "$NS" delete secret -l fds.321team/probe=pg03 --wait=true
-run remaining "${OC[@]}" -n "$NS" get deployment,replicaset,pod,service,serviceaccount,networkpolicy,secret -l fds.321team/probe=pg03 -o name
-CLEANUP=FAIL
-if [[ "$(rc_of delete)" == 0 && "$(rc_of delete-secret)" == 0 && "$(rc_of remaining)" == 0 && ! -s "$OUT_DIR/remaining.out" ]]; then
-  CLEANUP=OK
-fi
-[[ "$("${OC[@]}" get namespace "$NS" -o jsonpath='{.metadata.uid}')" == "$NS_UID" ]] || die "namespace UID 변경"
+# ---- admission: 앱 SA 단독 주체(-z)로 Deployment별 평가 ----
+# -z 없이 실행하면 self-subject review가 되어 실행자 권한이 섞인다.
+while IFS=$'\t' read -r v name sa; do
+  run "review-$v-$name" "${OC[@]}" -n "$NS" adm policy scc-subject-review -z "$sa" \
+    -f "$OUT_DIR/deploy-$v-$name.json" -o json
+done <"$OUT_DIR/targets.tsv"
 
-{
-  echo "MSA_SHA=$MSA_SHA"; echo "NS=$NS"; echo "ENV=$PORT_ENV"
-  for s in apply rollout-engine wait-tx exec-fds-engine exec-transaction-api delete delete-secret remaining; do
-    echo "RC_${s}=$(rc_of "$s")"
-  done
-  echo "--- pods (name / scc / runAsUser / fsGroup / phase / ready / restarts / imageID) ---"
-  cat "$OUT_DIR/pods-summary.out"
-  echo "--- exec fds-engine ---"; cat "$OUT_DIR/exec-fds-engine.out"
-  echo "--- exec transaction-api ---"; cat "$OUT_DIR/exec-transaction-api.out"
-  echo "CLEANUP=$CLEANUP"
-  echo "판정 기준은 계획서 §4. 이 파일은 판정이 아니다."
-} >"$OUT_DIR/runtime-result.txt"
+set +e
+python3 - "$OUT_DIR" <<'PY'
+import json, os, sys
+out = sys.argv[1]
+rows, errors = [], []
+for line in open(os.path.join(out, 'targets.tsv')).read().split('\n'):
+    if not line:
+        continue
+    v, name, sa = line.split('\t')
+    base = os.path.join(out, f'review-{v}-{name}')
+    rc = open(base + '.rc').read().strip()
+    allowed, reason = None, ''
+    try:
+        if rc != '0':
+            raise ValueError(f'rc={rc}')
+        doc = json.load(open(base + '.out'))
+        items = doc['items'] if 'items' in doc else [doc]
+        if len(items) != 1:
+            raise ValueError(f'items={len(items)}')
+        status = items[0].get('status') or {}
+        allowed = (status.get('allowedBy') or {}).get('name')
+        reason = status.get('reason', '')
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        errors.append(f'{v}/{name}: {e}')
+        continue
+    sa_rc = open(os.path.join(out, f'sa-{sa}.rc')).read().strip()
+    rows.append({'variant': v, 'deployment': name, 'service_account': sa,
+                 'sa_present': sa_rc == '0', 'allowed_by': allowed, 'reason': reason})
 
+def verdict(row):
+    a = row['allowed_by']
+    if row['variant'] == 'portable':
+        return 'RESTRICTED_V2' if a == 'restricted-v2' else ('REJECTED' if a is None else 'BROADER_SCC:' + a)
+    return 'REJECTED' if a is None else ('ALLOWED_RESTRICTED_V2' if a == 'restricted-v2' else 'ALLOWED_BY_OTHER_SCC:' + a)
+
+for r in rows:
+    r['verdict'] = verdict(r)
+if errors or len(rows) != 4:
+    code, summary = 11, 'COLLECTION_ERROR'
+elif any(r['variant'] == 'portable' and r['verdict'] != 'RESTRICTED_V2' for r in rows):
+    code, summary = 20, 'PORTABLE_NOT_RESTRICTED_V2'
+elif any(r['variant'] == 'fixed' and r['verdict'] != 'REJECTED' for r in rows):
+    code, summary = 21, 'FIXED_UNEXPECTEDLY_ALLOWED'
+else:
+    code, summary = 0, 'ADMISSION_AS_EXPECTED'
+result = {'summary': summary, 'rc': code, 'rows': rows, 'errors': errors,
+          'cluster_mutation': 'NONE', 'runtime': 'NOT_RUN', 'pg03': 'NOT_DECIDED_BY_THIS_TOOL'}
+json.dump(result, open(os.path.join(out, 'admission-result.json'), 'w'), indent=1, sort_keys=True)
+with open(os.path.join(out, 'admission-result.txt'), 'w') as f:
+    for r in rows:
+        f.write(f"{r['variant']}\t{r['deployment']}\t{r['service_account']}\tsa_present={r['sa_present']}"
+                f"\tallowedBy={r['allowed_by'] or '<none>'}\t{r['verdict']}\n")
+    for e in errors:
+        f.write(f'ERROR\t{e}\n')
+    f.write(f'SUMMARY={summary}\nCLUSTER_MUTATION=NONE\nRUNTIME=NOT_RUN\n')
+    f.write('주의: admission 참고 근거. 실제 SCC annotation/UID/기동 확인과 PG03 판정은 별도.\n')
+    if any(not r['sa_present'] for r in rows):
+        f.write('주의: 앱 SA가 없는 상태의 평가(이름 기준). SA 생성 후 재확인 필요.\n')
+sys.exit(code)
+PY
+RESULT=$?
+set -e
+
+[[ "$("${OC[@]}" get namespace "$NS" -o 'jsonpath={.metadata.uid}')" == "$EXPECTED_NS_UID" ]] \
+  || die 10 "실행 중 namespace UID 변경"
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
-cat "$OUT_DIR/admission-result.txt" "$OUT_DIR/runtime-result.txt"
+cat "$OUT_DIR/admission-result.txt"
 echo "EVIDENCE_DIR=$OUT_DIR"
-[[ "$CLEANUP" == OK ]] || exit 30
-exit 0
+exit "$RESULT"

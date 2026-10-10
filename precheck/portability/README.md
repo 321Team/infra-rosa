@@ -158,11 +158,30 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
 - RC11=대상 입력 부적합, RC12=필수 raw 파일 부재, RC13=namespace identity 변경. 기타 필수 명령 오류는 해당 nonzero RC로 종료한다.
 - MOCK: 기존 10 input cases 및 dry-run2, 경로 재사용 거부·원본 보존, raw 변조 검출, context/API 입력 거부, 해시 실패 시 성공 출력 없음 확인. 실제 Shared OCP/ROSA 접속·Runtime·PG03 인수는 미수행이다.
 
-## 2026-10-10 infra-rosa#6 PG-03 실제 manifest 검사 (`pg03-rosa-check.sh`, 초안)
+## 2026-10-10 infra-rosa#6 PG-03 실제 manifest 검사 (`pg03-rosa-check.sh`, v2 admission 전용)
 
-계획: [#6 댓글 6096647524](https://github.com/321Team/infra-rosa/issues/6#issuecomment-6096647524). 위 W0 스크립트는 일반 Pod 하나로 검사합니다. 이 스크립트는 fds-msa `deploy/base` 실제 manifest(clean checkout, `MSA_SHA` 고정)를 씁니다.
+계획: [#6 댓글 6096647524](https://github.com/321Team/infra-rosa/issues/6#issuecomment-6096647524). 위 W0 스크립트는 일반 Pod 하나로 검사합니다. 이 스크립트는 fds-msa `deploy/base` 실제 manifest(clean checkout, `MSA_SHA` 고정)를 씁니다. v2는 [PR36 리뷰](https://github.com/321Team/infra-rosa/pull/36#pullrequestreview-5478734431)를 반영했습니다.
 
-- `MODE=admission`: 조회 전용입니다. 고정 UID 버전(T1)과 portable 버전(T2)을 렌더해 `oc adm policy scc-subject-review`로 어떤 SCC가 받아주는지 기록합니다. Deployment server dry-run은 SCC를 평가하지 않기 때문입니다. 클러스터는 변경하지 않습니다.
-- `MODE=runtime`: 클러스터를 변경합니다. `PG03_RUNTIME_GO=yes`가 있어야 실행됩니다. portable 렌더(replicas 1, Route·lab-db 없음)를 apply하고 SCC 주석, UID/GID, imageID, 읽기 전용 루트, `/livez`·`/readyz`를 확인한 뒤 삭제하고 잔여가 없는지 확인합니다. transaction-api는 연결되지 않는 더미 `DATABASE_URL`로 시작만 확인하고, Ready 판정은 #43 lab-db 범위로 넘깁니다. namespace는 지우지 않습니다(#5 소유).
-- fds-msa는 수정하지 않습니다. 임시 overlay는 증적 폴더 안에 만듭니다.
-- 상태: STATIC(`bash -n`)만 확인했습니다. MOCK·CI·SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
+**하는 일(조회만, 클러스터 변경 없음)**
+1. 첫 API 요청 전에 kubeconfig context의 서버가 `API`와 같은지 확인하고, 이어서 Cluster ID와 Namespace UID를 **승인 inventory 값**(`EXPECTED_CLUSTER_ID`, `EXPECTED_NS_UID`)과 대조합니다. System namespace(`openshift-*`, `kube-*`, `default`)는 입력 단계에서 거부합니다.
+2. portable(UID 고정 없음)과 fixed(Phase 1 `runAsUser 10001`/`runAsGroup 999`) 두 벌을 렌더합니다. 라벨을 덧붙이지 않습니다.
+3. 렌더 결과에서 **Deployment 2개만** 골라 냅니다. SA·Service·NetworkPolicy는 Pod template이 없어 리뷰에 넘기지 않습니다(oc가 오류를 냄).
+4. 앱 SA(`fds-engine-sa`, `transaction-api-sa`)의 존재를 기록합니다. NotFound만 부재로 인정하고, 403 등 다른 오류는 중단합니다.
+5. 각 Deployment를 **앱 SA 단독 주체**(`-z <sa>`)로 `oc adm policy scc-subject-review -o json` 평가합니다. `-z`가 없으면 self-subject 평가가 되어 실행자 권한이 섞입니다.
+6. 4건 결과를 구조적으로 판정합니다.
+
+| 종료 코드 | 의미 |
+|---:|---|
+| 0 | portable 2건 모두 `restricted-v2`, fixed 2건 모두 거부 |
+| 2 | 입력 오류(oc 호출 전). `MODE=runtime` 포함 |
+| 10 | 대상 불일치(서버·Cluster ID·NS UID) 또는 조회 불가 |
+| 11 | 수집 오류: 렌더·변환·리뷰 rc≠0, 결과 누락·부분 출력, Deployment 2건 아님, SA 조회 오류 |
+| 20 | portable이 `restricted-v2`가 아님(거부 또는 더 넓은 SCC — SA 권한 점검 필요) |
+| 21 | fixed가 허용됨(`restricted-v2` 또는 더 넓은 SCC). "거부 성공"으로 표시하지 않음 |
+
+- 증적: `context.txt`(수집기 SHA-256·Git HEAD, Cluster ID, NS UID, whoami), `commands.tsv`(명령별 시작·종료 UTC·rc), 명령별 `.out/.err/.rc`, `admission-result.{txt,json}`, `SHA256SUMS`. SHA256SUMS 생성은 시험 PASS가 아닙니다.
+- 실행 권한: Cluster ID 조회(`clusterversion` get)와 namespace·SA 조회, `scc-subject-review`가 필요합니다. 이 권한이 named user의 namespace admin에 없으면 #5에서 정한 승인된 조회 주체로 실행합니다. 배포 SA(`ci-cd/fds-deployer`)에 권한을 더하지 않습니다.
+- 결과의 의미: admission **참고 근거**입니다. 실제 SCC annotation·UID·기동 확인을 대체하지 않으며, 이 도구의 rc0이 PG03 PASS는 아닙니다.
+- **Runtime(실제 Pod 기동) 시험은 이 PR에서 뺐습니다.** 기존 자원 보존(동명 자원 존재 시 첫 변경 전 STOP), 실행별 이름·UID 장부, 장부 기준 정리·잔여 판정, 별도 시험 실행자 범위를 설계한 뒤 별도 PR로 리뷰받습니다.
+- MOCK 시험: `bash precheck/portability/tests/pg03-mock.sh`(가짜 oc, 22건). 입력 거부 7건(oc 호출 0), 서버 불일치(API 요청 0), Cluster ID 불일치·403, NS UID 불일치, 리뷰 rc7(지원 안 되는 객체), 부분 출력, Deployment 누락, SA 403, portable 거부·넓은 SCC, fixed의 restricted-v2·넓은 SCC 허용, 정상, SA NotFound 기록, 기존 OUT_DIR 보존. 모든 경우 쓰기 명령 0건을 확인합니다.
+- 상태: STATIC·MOCK만 확인했습니다. 실제 oc·kustomize 렌더와 SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
