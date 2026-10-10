@@ -1,0 +1,26 @@
+# infra-rosa#7 — DNS만 허용 (openshift-dns)
+# OVN-Kubernetes는 Service DNAT 후의 Pod 포트로 판정하므로 5353(dns-default Pod 포트)을 연다.
+# 53은 Service 포트 표기용으로 함께 둔다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns
+  namespace: __NS__
+  labels:
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: netpol-baseline
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - { protocol: UDP, port: 5353 }
+        - { protocol: TCP, port: 5353 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

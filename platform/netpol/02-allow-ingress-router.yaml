@@ -1,0 +1,25 @@
+# infra-rosa#7 — Route(기본 IngressController)에서 들어오는 트래픽만 허용
+# OpenShift 기본 라벨 policy-group.network.openshift.io/ingress 사용.
+# 대상 Pod는 route-exposed=true 라벨이 붙은 것만. 포트는 앱별로 좁힌다(probe는 8080).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-from-router
+  namespace: __NS__
+  labels:
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: netpol-baseline
+spec:
+  podSelector:
+    matchLabels:
+      route-exposed: "true"
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              policy-group.network.openshift.io/ingress: ""
+      ports:
+        - { protocol: TCP, port: 8080 }

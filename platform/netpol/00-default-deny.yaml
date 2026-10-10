@@ -1,0 +1,17 @@
+# infra-rosa#7 — Namespace 기본 차단 (Ingress + Egress 모두)
+# 초안 (2026-10-10, 미리뷰·미적용). __NS__ 는 #5 Namespace/Team Code 확정값으로 치환.
+# 이 정책만 적용하면 DNS도 막힌다. 01~03을 함께 적용한다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: __NS__
+  labels:
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: netpol-baseline
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

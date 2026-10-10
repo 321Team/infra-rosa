@@ -1,0 +1,65 @@
+# infra-rosa#7 — Handoff 항목 8 "Route 생성 가능 상태" 확인용
+# 기본 IngressController 사용(새 LoadBalancer 생성 없음). edge TLS = 기본 *.apps 인증서.
+# __HTTP_IMAGE__ 예: registry.access.redhat.com/ubi9/httpd-24@sha256:... (8080, 임의 UID 동작)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: route-probe
+  namespace: __NS__
+  labels:
+    app: route-probe
+    route-exposed: "true"
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: route-test
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: httpd
+      image: __HTTP_IMAGE__
+      ports:
+        - containerPort: 8080
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 100m, memory: 128Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: route-probe
+  namespace: __NS__
+  labels:
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: route-test
+spec:
+  selector:
+    app: route-probe
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: route-probe
+  namespace: __NS__
+  labels:
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: route-test
+spec:
+  to:
+    kind: Service
+    name: route-probe
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
