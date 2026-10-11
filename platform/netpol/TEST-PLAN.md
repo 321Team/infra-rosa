@@ -1,10 +1,13 @@
 # infra-rosa#7 — NetworkPolicy·Egress·Hybrid Route TCP Test 계획 (초안)
 
-- 작성: 이하영, 2026-10-10. **미리뷰·미적용.** 리뷰는 이권욱 님 우선(README 변경 절차: manifest는 코드 변경이라 독립 리뷰 후 적용)
+- 작성: 이하영, 2026-10-10. 독립 리뷰: 이권욱 APPROVE(HEAD `4457b1f`, 소스/시험계획 단계). **ROSA 적용·실행은 아직 없음(미적용).** 이 승인은 실행 Gate·AC 인수가 아니다
 - 대상 티켓: [infra-rosa#7](https://github.com/321Team/infra-rosa/issues/7) → 원티켓 [baseline#38](https://github.com/321Team/fds-project-baseline/issues/38) AC-3(NetworkPolicy/Egress), AC-4(On-Prem TCP)
 - 이 문서의 체크는 원티켓 AC 체크를 대신하지 않는다.
 
-## 0. 실행 전 채워야 할 값 (지금은 전부 미확정)
+## 0. 실행 전 채워야 할 값 (확정된 명명 규칙과 미확정 실행 입력 구분)
+
+- **확정(명명):** ROSA 대상 Namespace 명명(`fds-app` 등)과 `team=321team` — #5/#3 결정 기준
+- **미확정(실행 입력):** 실제 대상 Namespace 선택, IF-18/IF-19 IP·Port, 이미지 digest, Cluster 정보 — 아래 표의 상태가 수용 기록으로 바뀌기 전에는 채우지 않는다
 
 | 자리표시자 | 출처 | 현재(2026-10-10) |
 |---|---|---|
@@ -34,7 +37,7 @@ Pod에서 클러스터 밖으로 나가는 트래픽은 기본적으로 **Worker
    - 사전 snapshot: `oc get networkpolicy,deploy,pod,svc,route -n __NS__ -o yaml` 원본과 각 NetworkPolicy의 이름·UID·`spec` SHA-256, Namespace UID를 저장한다.
    - **NetworkPolicy가 1개라도 있으면 B 단계는 성립하지 않는다.** 허용 규칙은 합산되므로 기존 allow 정책이 있으면 00~03만 보고 안전하다고 판단할 수 없다. 이 경우 변경 없이 STOP하고 격리 시험 namespace를 승인받는다.
    - 이 시험이 만드는 자원(`10`·`11`·`12`의 Pod·Service·Route·`probe-egress-to-route`)과 같은 이름이 이미 있으면 첫 변경 전에 STOP한다.
-2. `10-test-pods.yaml`, `11-route-probe.yaml`, `12-ingress-isolation-probe.yaml`을 적용 → **정책 없는 상태 기준값(B 단계)** 측정
+2. `10-test-pods.yaml`, `11-route-probe.yaml`, `12-ingress-isolation-probe.yaml`을 적용 → **기준값(B 단계: 플랫폼 정책 `00~03` 미적용, `12`의 sender Egress 정책은 유지)** 측정
 3. `00` → `01` → `02` → `03` 순서로 적용 → **정책 적용 후(A 단계)** 측정
 4. 정책 적용 직후 `oc get networkpolicy -n __NS__ -o yaml` 원본 보존
 5. A 단계 직후 NetworkPolicy 목록을 사전 snapshot과 대조한다. 이 시험이 만든 5개(`fds-platform-default-deny`, `allow-*` 3개, `probe-egress-to-route`) 외의 정책이 생겼으면 STOP하고 기록한다(다른 실행자의 allow 정책 혼입 탐지).
@@ -96,7 +99,7 @@ N2~N4의 B 단계는 On-Prem 방화벽이나 NAT 여부에 따라 원래 막혀 
 
 ## 8. 비용
 
-- 추가 AWS 리소스 없음: Route는 기존 기본 router를 쓰고, LoadBalancer를 새로 만들지 않음. Pod 3개는 기존 Worker 위의 소형 자원
+- 추가 AWS 리소스 없음: Route는 기존 기본 router를 쓰고, LoadBalancer를 새로 만들지 않음. 시험 Pod 4개(`tcp-allowed`, `tcp-control`, `route-probe`, `ingress-probe`)는 기존 Worker 위의 소형 자원
 - 클러스터 가동 시간 자체의 비용은 이 시험과 별개 → 이권욱 판정 대상
 
 ## 9. 열린 질문 (리뷰 때 확인)
