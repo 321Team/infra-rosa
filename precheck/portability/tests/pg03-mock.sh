@@ -91,6 +91,10 @@ PY
       bad_fixed_status_empty:fixed)  echo "{$K,\"status\":{}}"; exit 0;;
       bad_fixed_no_api:fixed)        echo '{"kind":"PodSecurityPolicySubjectReview","status":{"reason":"denied","template":{}}}'; exit 0;;
       bad_fixed_reason_type:fixed)   echo "{$K,\"status\":{\"reason\":5,\"template\":{}}}"; exit 0;;
+      bad_fixed_template_null:fixed) echo "{$K,\"status\":{\"template\":null}}"; exit 0;;
+      bad_fixed_template_list:fixed) echo "{$K,\"status\":{\"template\":[]}}"; exit 0;;
+      bad_fixed_template_str:fixed)  echo "{$K,\"status\":{\"template\":\"not-a-pod-template\"}}"; exit 0;;
+      bad_fixed_reason_empty:fixed)  echo "{$K,\"status\":{\"reason\":\"\"}}"; exit 0;;
       bad_allow_wrong_api:portable)  echo '{"apiVersion":"v1","kind":"PodSecurityPolicySubjectReview","status":{"allowedBy":{"name":"restricted-v2"}}}'; exit 0;;
       bad_allow_status_str:portable) echo "{$K,\"status\":\"restricted-v2\"}"; exit 0;;
       bad_allow_ref_str:portable)    echo "{$K,\"status\":{\"allowedBy\":\"restricted-v2\"}}"; exit 0;;
@@ -162,6 +166,7 @@ check sa_403 11 yes SCENARIO=sa_403
 # 깨진 응답은 거부·허용으로 읽지 않고 수집 오류(리뷰 B4)
 for s in bad_fixed_empty_doc bad_fixed_wrong_kind bad_fixed_status_null bad_fixed_status_empty \
          bad_fixed_no_api bad_fixed_reason_type \
+         bad_fixed_template_null bad_fixed_template_list bad_fixed_template_str bad_fixed_reason_empty \
          bad_allow_wrong_api bad_allow_status_str bad_allow_ref_str bad_allow_empty_name; do
   check "$s" 11 yes SCENARIO="$s"
   grep -q '^SUMMARY=COLLECTION_ERROR$' "$T/out-$s/admission-result.txt"

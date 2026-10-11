@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # infra-rosa#6 PG-03 — ROSA restricted-v2 SCC admission 수집기 (v2, admission 전용)
 #
-# 하는 일(클러스터 변경 없음, 조회만):
+# 하는 일(영구 자원 변경 없음. 단 scc-subject-review는 review API에 대한 Create(POST)라
+#   get 권한만으로는 안 될 수 있다 — #5의 승인된 조회·리뷰 주체로 실행):
 #   fds-msa deploy/base 실제 manifest를 portable(T2, UID 고정 없음)과 fixed(T1, Phase 1 UID/GID)로 렌더한다.
 #   렌더 결과에서 Deployment 2개만 골라, 각 Deployment의 앱 ServiceAccount 단독 주체(-z)로
 #   `oc adm policy scc-subject-review`를 돌리고 allowedBy SCC를 구조적으로 판정한다.
@@ -228,13 +229,17 @@ for line in open(os.path.join(out, 'targets.tsv')).read().split('\n'):
         if allowed_ref is not None:
             if not isinstance(allowed_ref, dict) or not isinstance(allowed_ref.get('name'), str) or not allowed_ref['name']:
                 raise ValueError('invalid allowedBy')
-        elif 'reason' not in status and 'template' not in status:
-            # 거부 응답에도 status.template(omitempty 아님)이 실린다. 아무 칸도 없으면 거부 근거가 없다.
-            raise ValueError('empty review status')
         allowed = None if allowed_ref is None else allowed_ref['name']
         reason = status.get('reason', '')
         if not isinstance(reason, str):
             raise ValueError('invalid reason')
+        # status.template은 API상 optional(omitempty)이다. 있으면 객체여야 한다.
+        if 'template' in status and not isinstance(status['template'], dict):
+            raise ValueError('invalid template')
+        # 거부로 읽으려면 근거(비어 있지 않은 reason 또는 template 객체)가 있어야 한다(리뷰 B4 잔여).
+        # 실제 oc 응답 형식은 첫 승인 회차 원문으로 확인한다. 현장에서 이 기준을 느슨하게 바꾸지 않는다.
+        if allowed_ref is None and not reason.strip() and not isinstance(status.get('template'), dict):
+            raise ValueError('missing denial evidence')
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         errors.append(f'{v}/{name}: {e}')
         continue
