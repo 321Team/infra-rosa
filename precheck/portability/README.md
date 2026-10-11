@@ -175,10 +175,13 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
 | 0 | portable 2건 모두 `restricted-v2`, fixed 2건 모두 거부 |
 | 2 | 입력 오류(oc 호출 전). `MODE=runtime` 포함 |
 | 10 | 대상 불일치(서버·Cluster ID·NS UID) 또는 조회 불가 |
-| 11 | 수집 오류: 렌더·변환·리뷰 rc≠0, 결과 누락·부분 출력, Deployment 2건 아님, SA 조회 오류 |
+| 11 | 수집 오류: 렌더·변환·리뷰 rc≠0, 결과 누락·부분 출력, Deployment 2건 아님, SA 조회 오류, **응답 형식 이상**(아래) |
 | 20 | portable이 `restricted-v2`가 아님(거부 또는 더 넓은 SCC — SA 권한 점검 필요) |
 | 21 | fixed가 허용됨(`restricted-v2` 또는 더 넓은 SCC). "거부 성공"으로 표시하지 않음 |
 
+- 응답 형식 검사(리뷰 B4): 리뷰 결과마다 `apiVersion: security.openshift.io/v1`, `kind: PodSecurityPolicySubjectReview`, 객체인 `status`가 있어야 합니다. `allowedBy`가 있으면 비어 있지 않은 `name`이 있는 객체여야 하고, `reason`은 문자열이어야 합니다. `allowedBy`가 없을 때 `reason`도 `template`도 없는 빈 `status`는 거부로 읽지 않습니다. 이 경우들은 모두 RC11입니다.
+  - 아직 실측하지 않은 가정: 실제 `oc` 출력에 `apiVersion`/`kind`가 실리고, 거부 응답에도 `status.template`이 있다고 봅니다(oc 소스 구조 기준). **첫 실행에서 이 가정 때문에 RC11이 나오면 원본 `.out`을 보존하고, 그 원문을 근거로 검사 기준을 고친 뒤 재리뷰를 받습니다. 현장에서 기준을 느슨하게 바꾸지 않습니다.**
+- 증적 분류: Cluster ID·NS UID·서버 대조는 **필수**입니다. 실패하면 RC10으로 중단합니다. `whoami`·`oc version`·namespace UID 범위 annotation 조회는 **보조 증적**이라 실패해도 진행하지만, rc와 오류는 `commands.tsv`와 `.err`에 남기고 결과 보고에 함께 적습니다.
 - 증적: `context.txt`(수집기 SHA-256·Git HEAD, Cluster ID, NS UID, whoami), `commands.tsv`(명령별 시작·종료 UTC·rc), 명령별 `.out/.err/.rc`, `admission-result.{txt,json}`, `SHA256SUMS`. SHA256SUMS 생성은 시험 PASS가 아닙니다.
 - 실행 권한: Cluster ID 조회(`clusterversion` get)와 namespace·SA 조회, `scc-subject-review`가 필요합니다. 이 권한이 named user의 namespace admin에 없으면 #5에서 정한 승인된 조회 주체로 실행합니다. 배포 SA(`ci-cd/fds-deployer`)에 권한을 더하지 않습니다.
 - 결과의 의미: admission **참고 근거**입니다. 실제 SCC annotation·UID·기동 확인을 대체하지 않으며, 이 도구의 rc0이 PG03 PASS는 아닙니다.

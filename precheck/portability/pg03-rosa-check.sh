@@ -215,9 +215,26 @@ for line in open(os.path.join(out, 'targets.tsv')).read().split('\n'):
         items = doc['items'] if 'items' in doc else [doc]
         if len(items) != 1:
             raise ValueError(f'items={len(items)}')
-        status = items[0].get('status') or {}
-        allowed = (status.get('allowedBy') or {}).get('name')
+        # 응답 형식을 확인한다. 비었거나 깨진 응답을 "거부"로 읽지 않는다(리뷰 B4).
+        item = items[0]
+        if not isinstance(item, dict):
+            raise ValueError('review item is not an object')
+        if item.get('apiVersion') != 'security.openshift.io/v1' or item.get('kind') != 'PodSecurityPolicySubjectReview':
+            raise ValueError('unexpected review type')
+        status = item.get('status')
+        if not isinstance(status, dict):
+            raise ValueError('missing/invalid review status')
+        allowed_ref = status.get('allowedBy')
+        if allowed_ref is not None:
+            if not isinstance(allowed_ref, dict) or not isinstance(allowed_ref.get('name'), str) or not allowed_ref['name']:
+                raise ValueError('invalid allowedBy')
+        elif 'reason' not in status and 'template' not in status:
+            # 거부 응답에도 status.template(omitempty 아님)이 실린다. 아무 칸도 없으면 거부 근거가 없다.
+            raise ValueError('empty review status')
+        allowed = None if allowed_ref is None else allowed_ref['name']
         reason = status.get('reason', '')
+        if not isinstance(reason, str):
+            raise ValueError('invalid reason')
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         errors.append(f'{v}/{name}: {e}')
         continue

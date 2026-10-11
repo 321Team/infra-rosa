@@ -82,10 +82,26 @@ PY
     esac
     [[ "$SCENARIO" == portable_none && $variant == portable ]] && scc=''
     [[ "$SCENARIO" == portable_broad && $variant == portable ]] && scc=anyuid
+    # 깨진 응답(리뷰 B4): bad_fixed_* 는 fixed 거부 응답을, bad_allow_* 는 portable 허용 응답을 바꾼다.
+    K='"apiVersion":"security.openshift.io/v1","kind":"PodSecurityPolicySubjectReview"'
+    case "$SCENARIO:$variant" in
+      bad_fixed_empty_doc:fixed)     echo '{}'; exit 0;;
+      bad_fixed_wrong_kind:fixed)    echo '{"apiVersion":"apps/v1","kind":"Deployment","status":{}}'; exit 0;;
+      bad_fixed_status_null:fixed)   echo "{$K,\"status\":null}"; exit 0;;
+      bad_fixed_status_empty:fixed)  echo "{$K,\"status\":{}}"; exit 0;;
+      bad_fixed_no_api:fixed)        echo '{"kind":"PodSecurityPolicySubjectReview","status":{"reason":"denied","template":{}}}'; exit 0;;
+      bad_fixed_reason_type:fixed)   echo "{$K,\"status\":{\"reason\":5,\"template\":{}}}"; exit 0;;
+      bad_allow_wrong_api:portable)  echo '{"apiVersion":"v1","kind":"PodSecurityPolicySubjectReview","status":{"allowedBy":{"name":"restricted-v2"}}}'; exit 0;;
+      bad_allow_status_str:portable) echo "{$K,\"status\":\"restricted-v2\"}"; exit 0;;
+      bad_allow_ref_str:portable)    echo "{$K,\"status\":{\"allowedBy\":\"restricted-v2\"}}"; exit 0;;
+      bad_allow_empty_name:portable) echo "{$K,\"status\":{\"allowedBy\":{\"name\":\"\"}}}"; exit 0;;
+    esac
     if [[ -n "$scc" ]]; then
-      printf '{"kind":"PodSecurityPolicySubjectReview","status":{"allowedBy":{"name":"%s"}}}\n' "$scc"
+      printf '{%s,"status":{"allowedBy":{"kind":"SecurityContextConstraints","name":"%s"},"template":{}}}\n' "$K" "$scc"
+    elif [[ "$SCENARIO" == fixed_template_only ]]; then
+      printf '{%s,"status":{"template":{}}}\n' "$K"
     else
-      printf '{"kind":"PodSecurityPolicySubjectReview","status":{"reason":"denied"}}\n'
+      printf '{%s,"status":{"reason":"denied","template":{}}}\n' "$K"
     fi
     exit 0;;
 esac
@@ -142,6 +158,16 @@ grep -q '^SUMMARY=COLLECTION_ERROR$' "$T/out-review_rc7/admission-result.txt"
 check partial 11 yes SCENARIO=partial
 check one_deployment 11 yes SCENARIO=one_deployment
 check sa_403 11 yes SCENARIO=sa_403
+
+# 깨진 응답은 거부·허용으로 읽지 않고 수집 오류(리뷰 B4)
+for s in bad_fixed_empty_doc bad_fixed_wrong_kind bad_fixed_status_null bad_fixed_status_empty \
+         bad_fixed_no_api bad_fixed_reason_type \
+         bad_allow_wrong_api bad_allow_status_str bad_allow_ref_str bad_allow_empty_name; do
+  check "$s" 11 yes SCENARIO="$s"
+  grep -q '^SUMMARY=COLLECTION_ERROR$' "$T/out-$s/admission-result.txt"
+done
+# reason 없이 template만 있는 거부 응답은 정상 거부로 인정
+check fixed_template_only 0 yes SCENARIO=fixed_template_only
 
 # 판정 분기
 check portable_none 20 yes SCENARIO=portable_none
