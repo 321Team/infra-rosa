@@ -1,0 +1,57 @@
+# infra-rosa#7 — TCP Test용 Pod 2개 (같은 이미지, 라벨만 다름)
+#  tcp-allowed : onprem-egress=true  → 승인 경로 허용 대상
+#  tcp-control : 라벨 없음           → 같은 목적지가 정책 때문에 막히는지 비교
+# restricted-v2 SCC에서 그대로 뜨도록 UID 지정 없음, 쓰기 없음.
+# 이미지는 실행 직전 digest로 고정(__TEST_IMAGE__ 예: registry.access.redhat.com/ubi9/ubi-minimal@sha256:...).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tcp-allowed
+  namespace: __NS__
+  labels:
+    app: tcp-probe
+    onprem-egress: "true"
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: tcp-test
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: __TEST_IMAGE__
+      command: ["sleep", "3600"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: tcp-control
+  namespace: __NS__
+  labels:
+    app: tcp-probe
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: tcp-test
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: __TEST_IMAGE__
+      command: ["sleep", "3600"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 64Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }

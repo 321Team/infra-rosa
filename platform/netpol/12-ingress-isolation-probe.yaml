@@ -1,0 +1,59 @@
+# Test-only N5 sender; delete this file after the test. No additional ingress allowance.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ingress-probe
+  namespace: __NS__
+  labels:
+    app: ingress-probe
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: ingress-isolation-test
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  containers:
+  - name: probe
+    image: __TEST_IMAGE__
+    command:
+    - sleep
+    - '3600'
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 100m
+        memory: 64Mi
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop:
+        - ALL
+      seccompProfile:
+        type: RuntimeDefault
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: probe-egress-to-route
+  namespace: __NS__
+  labels:
+    team: __TEAM__
+    project: fds-hybrid
+    purpose: ingress-isolation-test
+spec:
+  podSelector:
+    matchLabels:
+      app: ingress-probe
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: route-probe
+    ports:
+    - protocol: TCP
+      port: 8080
