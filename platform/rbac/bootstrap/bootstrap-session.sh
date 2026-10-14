@@ -23,29 +23,67 @@ WORKDIR="${WORKDIR:-$HOME/rosa-idp}"
 VERIFY_TRIES="${VERIFY_TRIES:-10}"      # 회수 수렴 읽기 확인 횟수 (읽기 전용 대기, 쓰기 유예 아님)
 VERIFY_INTERVAL="${VERIFY_INTERVAL:-60}" # 초
 STEPS_FILE="${1:?usage: bootstrap-session.sh <steps.sh>}"
+# `rosa list users` 표 머리글 정규식. **실제 ROSA CLI 1.2.53 출력으로 확정 전에는 실행본 아님.**
+# 머리글이 맞지 않으면(형식 불명) 빈 매칭을 '부재'로 보지 않고 UNKNOWN 으로 처리한다.
+ROSA_USERS_HEADER_RE="${ROSA_USERS_HEADER_RE:-^ID[[:space:]]+GROUPS[[:space:]]*$}"
 
 umask 077
 mkdir -p "$WORKDIR"
 chmod 700 "$WORKDIR"
+# 전용 kubeconfig: 기존(Shared OCP 등) context 를 건드리지 않는다.
+# cleanup 에서 지우지 않는다 — 회수 전 세션으로 D-11b 를 수동 판정한 뒤 정리한다.
+export KUBECONFIG="$WORKDIR/kubeconfig"
 
 grant_attempted=0
 watchdog_pid=""
 
 log() { printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*" >&2; }
 
-# 회수 확인: (1) 관리면 grant 기록 없음 (2) 현재 세션 SSAR 에서 '*' '*' 가 no (또는 세션 무효)
+# 관리면 grant 확인 → 표준출력: ABSENT | PRESENT | UNKNOWN
+#   ABSENT 는 rc0 + 머리글 형식 일치 + 대상 사용자 행에 cluster-admin 이 없을 때만.
+check_mgmt_grant() {
+  local out="$WORKDIR/verify-users.$1.out" err="$WORKDIR/verify-users.$1.err" rc=0
+  rosa list users -c "$CLUSTER_ID" >"$out" 2>"$err" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    log "MGMT_QUERY_FAILED rc=$rc"; echo UNKNOWN; return
+  fi
+  if ! head -n 1 "$out" | grep -Eq "$ROSA_USERS_HEADER_RE"; then
+    log "MGMT_FORMAT_UNKNOWN (머리글 불일치)"; echo UNKNOWN; return
+  fi
+  if tail -n +2 "$out" | awk -v u="$U" '$1 == u' | grep -q 'cluster-admin'; then
+    echo PRESENT
+  else
+    echo ABSENT
+  fi
+}
+
+# 회수 전 세션의 SSAR → 표준출력: NO | YES | UNKNOWN
+#   NO 는 rc1 + stdout 정확히 "no" + stderr 비어 있음일 때만. 오류·timeout·401 은 UNKNOWN(→ D-11a/b 수동 판정).
+check_session_cani() {
+  local out="$WORKDIR/verify-cani.$1.out" err="$WORKDIR/verify-cani.$1.err" rc=0
+  oc auth can-i '*' '*' --all-namespaces >"$out" 2>"$err" || rc=$?
+  if [[ $rc -eq 1 && "$(cat "$out")" == no && ! -s "$err" ]]; then
+    echo NO
+  elif [[ $rc -eq 0 && "$(cat "$out")" == yes ]]; then
+    echo YES
+  else
+    log "SESSION_QUERY_UNKNOWN rc=$rc"; echo UNKNOWN
+  fi
+}
+
+# 회수 확인(읽기 전용 수렴 대기). 둘 다 ABSENT/NO 일 때만 성공. 마지막 상태가 UNKNOWN 이면 그 사실을 남긴다.
 verify_revoked() {
-  local i
+  local i m s
   for ((i = 1; i <= VERIFY_TRIES; i++)); do
-    if ! rosa list users -c "$CLUSTER_ID" | awk -v u="$U" '$1 == u' | grep -q 'cluster-admin'; then
-      if ! oc auth can-i '*' '*' --all-namespaces -q >/dev/null 2>&1; then
-        log "VERIFY_OK try=$i (관리면 grant 없음, SSAR '*' '*' = no)"
-        return 0
-      fi
+    m=$(check_mgmt_grant "$i"); s=$(check_session_cani "$i")
+    if [[ "$m" == ABSENT && "$s" == NO ]]; then
+      log "VERIFY_OK try=$i mgmt=$m session=$s"
+      return 0
     fi
-    log "VERIFY_PENDING try=$i/$VERIFY_TRIES"
+    log "VERIFY_PENDING try=$i/$VERIFY_TRIES mgmt=$m session=$s"
     ((i < VERIFY_TRIES)) && sleep "$VERIFY_INTERVAL"
   done
+  log "VERIFY_FINAL mgmt=$m session=$s"
   return 1
 }
 

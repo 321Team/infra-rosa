@@ -12,14 +12,27 @@ echo "rosa $*" >>"$MOCK_LOG"
 case "$1 $2" in
   "grant user")  exit 0 ;;
   "revoke user") exit "${MOCK_REVOKE_RC:-0}" ;;
-  "list users")  [[ "${MOCK_STILL_ADMIN:-0}" == 1 ]] && echo "hayeoung  cluster-admins"; exit 0 ;;
+  "list users")
+    case "${MOCK_USERS_MODE:-std}" in
+      std)    echo "ID        GROUPS"; echo "gwonuk    dedicated-admins"
+              [[ "${MOCK_STILL_ADMIN:-0}" == 1 ]] && echo "hayeoung  cluster-admins" ;;
+      header) echo "ID        GROUPS" ;;                       # 정상 빈 목록
+      empty)  : ;;                                             # 출력 없음(형식 불명)
+      broken) echo "<html>gateway timeout</html>" ;;           # 깨진 출력
+    esac
+    exit "${MOCK_LIST_RC:-0}" ;;
 esac
 exit 0
 EOF
 cat >"$T/bin/oc" <<'EOF'
 #!/usr/bin/env bash
 echo "oc $*" >>"$MOCK_LOG"
-[[ "$1 $2" == "auth can-i" ]] && exit "${MOCK_CANI_RC:-1}"   # 1 = no
+if [[ "$1 $2" == "auth can-i" ]]; then
+  rc="${MOCK_CANI_RC:-1}"
+  case "$rc" in 0) echo yes ;; 1) echo no ;; esac
+  [[ -n "${MOCK_CANI_ERR:-}" ]] && echo "$MOCK_CANI_ERR" >&2
+  exit "$rc"
+fi
 exit 0
 EOF
 chmod +x "$T/bin/rosa" "$T/bin/oc"
@@ -62,6 +75,14 @@ run_case 6_revoke_fail     normal   1 MOCK_REVOKE_RC=42
 run_case 7_verify_timeout  normal   1 MOCK_STILL_ADMIN=1
 run_case 8_verify_cani_yes normal   1 MOCK_CANI_RC=0
 run_case 9_int_and_revoke_fail int  1 MOCK_REVOKE_RC=42
+# 리뷰 6164637613 R1: 조회 실패·형식 불명을 회수 성공으로 보면 안 됨
+run_case 11_mgmt_query_rc42    normal 1 MOCK_LIST_RC=42
+run_case 12_session_timeout42  normal 1 MOCK_CANI_RC=42 MOCK_CANI_ERR="Unable to connect: i/o timeout"
+run_case 13_both_rc42          normal 1 MOCK_LIST_RC=42 MOCK_CANI_RC=42
+run_case 14_mgmt_empty_output  normal 1 MOCK_USERS_MODE=empty
+run_case 15_mgmt_broken_output normal 1 MOCK_USERS_MODE=broken
+run_case 16_mgmt_header_only   normal 0 MOCK_USERS_MODE=header
+run_case 17_session_401        normal 1 MOCK_CANI_RC=1 MOCK_CANI_ERR="error: You must be logged in to the server (Unauthorized)"
 
 # 10: 로그를 파이프(tee)로 받을 때 watchdog 가 파이프를 붙잡지 않는지(마감 600초인데 즉시 끝나야 함)
 : >"$T/10.log"; start=$(date +%s)

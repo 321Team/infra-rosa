@@ -5,7 +5,10 @@ run_steps() {
   local ev="$WORKDIR/evidence-$(date +%Y%m%dT%H%M%S)"
   mkdir -p "$ev"
 
-  # ③ 로그인(비밀번호는 프롬프트에 본인 입력) + 대상 결속
+  # ③ 로그인(비밀번호는 프롬프트에 본인 입력) + 대상 결속. 쓰기 전에 전용 kubeconfig·ID·API·사용자를 확인한다.
+  [[ "$KUBECONFIG" == "$WORKDIR/kubeconfig" ]] || { log "STOP: 전용 KUBECONFIG 아님"; return 1; }
+  [[ "$(rosa describe cluster -c "$CLUSTER_ID" -o json | jq -r .api.url)" == "$API_URL" ]] \
+    || { log "STOP: CLUSTER_ID 의 API URL 불일치"; return 1; }
   oc login "$API_URL" -u "$U"
   [[ "$(oc whoami)" == "$U" ]] || { log "STOP: whoami 불일치"; return 1; }
   [[ "$(oc whoami --show-server)" == "$API_URL" ]] || { log "STOP: server 불일치"; return 1; }
@@ -48,10 +51,18 @@ run_steps() {
   [[ -s "$WORKDIR/t" ]] || { log "STOP: token 발급 실패"; return 1; }
   local p; p=$(cut -d. -f2 "$WORKDIR/t" | tr '_-' '/+')
   while (( ${#p} % 4 )); do p+='='; done
-  printf '%s' "$p" | base64 -d | jq -e '{exp, iat, aud, sub} | select(.exp != null)' \
-    >"$ev/10-token-claims.json"   # 만료를 확인할 수 없으면 여기서 실패 → STOP
-  local life=$(( $(jq .exp "$ev/10-token-claims.json") - $(jq .iat "$ev/10-token-claims.json") ))
-  (( life <= 900 )) || { log "STOP: 실제 유효기간 ${life}s > 900s (#46 계약 확정 전 상한)"; return 1; }
+  # claim 검사(리뷰 6164637613): exp/iat 숫자, 0 < exp-iat <= 900, 현재 시각 기준 미만료, sub 정확 일치, aud 비어 있지 않음.
+  # aud 기대값은 #46 소비 계약으로 고정 전까지 기록만(실행본에서 정확 일치로 바꿈). 어느 하나라도 아니면 jq -e 실패 → STOP.
+  printf '%s' "$p" | base64 -d | jq -e --argjson now "$(date +%s)" \
+      --arg sub "system:serviceaccount:ci-cd:fds-deployer" '
+    select((.exp | type) == "number" and (.iat | type) == "number")
+    | select((.exp - .iat) > 0 and (.exp - .iat) <= 900)
+    | select(.exp > $now)
+    | select(.sub == $sub)
+    | select((.aud // []) | length > 0)
+    | {exp, iat, life: (.exp - .iat), aud, sub}' \
+    >"$ev/10-token-claims.json" \
+    || { log "STOP: token claim 검사 실패(만료 확인 불가·900초 초과·sub/aud 불일치)"; return 1; }
   # A/D 시험: oc --token="$(cat "$WORKDIR/t")" 형태는 인자 노출 → KUBECONFIG 임시 파일로 수행(실행본에서 확정)
 
   # ⑩-b 권한 목록 저장(R2) — 회수 전에 반드시

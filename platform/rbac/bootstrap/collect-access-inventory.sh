@@ -30,26 +30,37 @@ match='def hit($u; $g): (.subjects // [])
 
 groups_json=$(jq -R -s 'split("\n") | map(select(length > 0))' "$OUT/effective-groups-$U.txt")
 
+# 열: scope(cluster | <namespace>) / binding 이름 / roleRef kind / roleRef name / subjects
+row='"\(.metadata.name)\t\(.roleRef.kind)\t\(.roleRef.name)\t\([.subjects[] | "\(.kind):\(.name)"] | join(","))"'
 {
   echo "# access paths for $U  (server: $(cat "$OUT/server.txt"))"
-  echo "## ClusterRoleBinding"
+  printf '# scope\tbinding\troleRef.kind\troleRef.name\tsubjects\n'
   jq -r --arg u "$U" --argjson g "$groups_json" "$match"'
-    .items[] | select(hit($u; $g))
-    | "\(.metadata.name)\t\(.roleRef.kind)/\(.roleRef.name)\t\([.subjects[] | "\(.kind):\(.name)"] | join(","))"' \
+    .items[] | select(hit($u; $g)) | "cluster\t" + '"$row" \
     "$OUT/clusterrolebindings.json"
   for ns in $NAMESPACES; do
-    echo "## RoleBinding $ns"
-    jq -r --arg u "$U" --argjson g "$groups_json" "$match"'
-      .items[] | select(hit($u; $g))
-      | "\(.metadata.name)\t\(.roleRef.kind)/\(.roleRef.name)\t\([.subjects[] | "\(.kind):\(.name)"] | join(","))"' \
+    jq -r --arg u "$U" --argjson g "$groups_json" --arg ns "$ns" "$match"'
+      .items[] | select(hit($u; $g)) | $ns + "\t" + '"$row" \
       "$OUT/rolebindings-$ns.json"
   done
 } >"$OUT/access-paths-$U.tsv"
 
-# 참조된 ClusterRole 규칙 저장(경로 검토용)
-cut -f2 "$OUT/access-paths-$U.tsv" | grep '^ClusterRole/' | cut -d/ -f2 | sort -u | while read -r r; do
-  oc get clusterrole "$r" -o json >"$OUT/clusterrole-$r.json"
-done
+# 참조된 ClusterRole / Role 규칙 저장(경로 검토용). 조회 실패·참조 부재·미지원 kind 는 실패(nonzero)로 끝낸다.
+# Role 은 namespace 와 함께 저장한다(같은 이름이 다른 namespace 에 있어도 섞이지 않게).
+grep -v '^#' "$OUT/access-paths-$U.tsv" | cut -f1,3,4 | sort -u >"$OUT/role-refs.tsv"
+while IFS=$'\t' read -r scope kind name; do
+  case "$kind" in
+    ClusterRole)
+      oc get clusterrole "$name" -o json >"$OUT/clusterrole-$name.json" ;;
+    Role)
+      if [[ "$scope" == cluster ]]; then
+        echo "STOP: ClusterRoleBinding 이 Role/$name 을 참조(비정상)" >&2; exit 3
+      fi
+      oc get role "$name" -n "$scope" -o json >"$OUT/role-$scope-$name.json" ;;
+    *)
+      echo "STOP: 미지원 roleRef.kind=$kind ($scope/$name)" >&2; exit 3 ;;
+  esac
+done <"$OUT/role-refs.tsv"
 
 ( cd "$OUT" && sha256sum -- *.json *.txt *.tsv >SHA256SUMS )
 echo "saved: $OUT ($(wc -l <"$OUT/access-paths-$U.tsv") lines in access-paths)"
