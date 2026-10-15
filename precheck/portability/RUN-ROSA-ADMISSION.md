@@ -21,12 +21,14 @@ ROSA는 앱이 사용자 번호(UID)를 직접 고르지 못하게 하는 기본
 
 | # | 조건 | 근거·담당 |
 |---|---|---|
-| S1 | ROSA Cluster/Worker Ready, Cluster ID 기록 | infra-rosa#4 Handoff 항목 1 |
+| S1 | ROSA Cluster/Worker Ready, 클러스터 ID 두 종류 기록: `rosa_cluster_id`(ROSA/OCM `rosa describe cluster`의 id)와 `openshift_cluster_uuid`(`oc get clusterversion version`의 `spec.clusterID`) | infra-rosa#4 Handoff 항목 1 |
 | S2 | namespace `fds-app` 생성과 UID 기록, 실행자 본인 IdP 사용자에 `fds-app` admin 부여 | infra-rosa#5 첫 설정 ⑤·⑥ |
-| S3 | 앱 SA `transaction-api-sa`·`fds-engine-sa` 적용(없어도 실행은 되며 결과에 "이름 기준 평가"로 표시) | fds-msa `deploy/overlays/rosa-prereq`, #5/#7 bootstrap 실행자 |
-| S4 | 작업창: 실행 시각과 실행자를 #6에 먼저 기록 | 이하영 → 이권욱 확인 |
+| S3 | 앱 SA `transaction-api-sa`·`fds-engine-sa`가 실제로 생성됐고 식별(이름·UID)을 확인함 | fds-msa `deploy/overlays/rosa-prereq`, #5/#7 bootstrap 실행자 |
+| S4 | 작업창: 실행 시각·실행자, **이번 회차에 채택한 infra-rosa·fds-msa SHA와 이미지**를 #6에 먼저 기록 | 이하영 → 이권욱 확인 |
 
 하나라도 없으면 실행하지 않습니다. 대신하는 값(Shared OCP 결과, 추정 UID 등)을 쓰지 않습니다.
+
+S3 보충: 정식 ROSA admission 입력은 `transaction-api-sa`와 `fds-engine-sa`의 실제 생성·식별 확인 후 수집합니다. 수집기가 SA 없이도 이름 기준으로 평가하는 기능은 실제 SA/RBAC/SCC 적용 완료를 증명하지 않으며, 이 안내의 시작 조건을 대신하지 않습니다.
 
 ## 입력값
 
@@ -34,11 +36,13 @@ ROSA는 앱이 사용자 번호(UID)를 직접 고르지 못하게 하는 기본
 |---|---|---|
 | `API` | `https://api.<cluster>…:443` | #4 Handoff 항목 2 |
 | `CTX` | 로그인 뒤 `oc config current-context` 값 | 2단계 |
-| `EXPECTED_CLUSTER_ID` | UUID | #4 Handoff 항목 1(`oc get clusterversion`의 `spec.clusterID`와 같아야 함) |
+| `EXPECTED_CLUSTER_ID` | **OpenShift UUID** | #4 Handoff 항목 1의 `openshift_cluster_uuid`(`oc get clusterversion`의 `spec.clusterID`). ROSA/OCM `rosa_cluster_id`와 다른 값이니 섞어 넣지 않습니다 |
 | `NS` / `EXPECTED_NS_UID` | `fds-app` / UUID | #5 ⑤ 기록 |
 | `PORT_ENV` | `ROSA` | 고정 |
-| `MSA_SHA` | 실행 당일 fds-msa main 40자리 SHA. `deploy/base`가 2026-10-08 `f618377` 이후 바뀌지 않았는지 함께 기록 | fds-msa |
-| `TX_IMAGE` / `ENG_IMAGE` | `<registry>/fds/transaction-api@sha256:a7093136d12640da00570c18ed278eacbb8e9ba3637c7d509571346eac45cc33` / `<registry>/fds/fds-engine@sha256:5e2a081cd51a957c3fad038b3eab07884c446ea3c2a814a905e3f41c24f67369` | digest는 #15 승인 기준(fds-msa `rosa-app` overlay와 같음). `<registry>`는 #42 결정값이고, 결정 전이면 `registry-input-pending.invalid`를 그대로 씁니다. admission은 이미지를 받지 않으므로 판정에 영향이 없습니다 |
+| `INFRA_ROSA_SHA` / `MSA_SHA` | 이번 회차에 **채택한** 40자리 SHA(검토된 버전). 실행 당일 main을 그냥 받아 쓰지 않습니다 | S4에서 #6에 먼저 기록한 값. 1단계에서 받은 코드가 이 SHA인지 대조합니다 |
+| `TX_IMAGE` / `ENG_IMAGE` | `<registry>/fds/transaction-api@sha256:<digest>` / `<registry>/fds/fds-engine@sha256:<digest>` | **실행 회차의 #43 채택 digest**(S4에 기록). 2026-10-15 기준 fds-msa `rosa-app` overlay(`c9c42cc`, fds-msa PR37)의 P2 current는 transaction-api `338b8a2871507ce8b42deedc916b26e350577ee6efd18df23d7ff2dd4b17dff0`, fds-engine `8b257adb08b6d381f72b66d3386efea6112a8f072ecfafcbcd463bcd1c3be89d`입니다. `<registry>`는 #42 결정값이고, 결정 전이면 `registry-input-pending.invalid`를 그대로 씁니다. admission은 이미지를 받지 않지만, 실제 배포·관측(PR39)과 같은 이미지로 묻도록 맞춥니다 |
+
+참고: 이전 판에 적었던 `a7093136…`/`5e2a081c…`는 #15 Phase 1 승인 digest입니다. 과거 admission 기준값(historical fixture)으로만 쓸 수 있고, 현재 ROSA 배포 이미지 설명으로 쓰지 않습니다. 이 digest의 P1 rollback 수용을 취소하거나 사용을 금지한다는 뜻은 아닙니다.
 
 ## CloudShell 순서
 
@@ -58,13 +62,14 @@ mkdir -p ~/pg03-rosa/bin && cd ~/pg03-rosa && curl -sSfLO https://mirror.openshi
 
 ### 1. 코드 받기
 
-infra-rosa main과 fds-msa main을 받고, 두 SHA를 화면에 남깁니다. 비공개 저장소라 비밀번호 자리에 **두 저장소 읽기(Contents: Read-only) fine-grained 토큰**을 넣습니다. 토큰은 어디에도 붙여 넣지 않고, 끝나면 삭제합니다.
+두 저장소를 받은 뒤 **S4에 기록한 채택 SHA로 고정**하고, 실제로 그 SHA인지 대조합니다. `HEAD_OK`가 나오지 않으면 멈춥니다. 비공개 저장소라 비밀번호 자리에 **두 저장소 읽기(Contents: Read-only) fine-grained 토큰**을 넣습니다. 토큰은 어디에도 붙여 넣지 않고, 끝나면 삭제합니다.
 
 ```bash
-cd ~/pg03-rosa && git clone -q https://github.com/321Team/infra-rosa.git && git clone -q https://github.com/321Team/fds-msa.git && echo "INFRA_ROSA=$(git -C infra-rosa rev-parse HEAD)" && echo "MSA_SHA=$(git -C fds-msa rev-parse HEAD)" && git -C fds-msa log -1 --format='BASE_LAST=%h %cI' -- deploy/base
+cd ~/pg03-rosa && INFRA_ROSA_SHA="<채택 infra-rosa SHA>" && MSA_SHA="<채택 fds-msa SHA>" && git clone -q https://github.com/321Team/infra-rosa.git && git clone -q https://github.com/321Team/fds-msa.git && git -C infra-rosa checkout -q --detach "$INFRA_ROSA_SHA" && git -C fds-msa checkout -q --detach "$MSA_SHA" && [ "$(git -C infra-rosa rev-parse HEAD)" = "$INFRA_ROSA_SHA" ] && [ "$(git -C fds-msa rev-parse HEAD)" = "$MSA_SHA" ] && echo HEAD_OK && git -C fds-msa log -1 --format='BASE_LAST=%h %cI' -- deploy/base
 ```
 
-`BASE_LAST`가 `f618377`이 아니면 `deploy/base`가 바뀐 것입니다. 실행 전에 변경 내용을 확인하고 #6에 기록합니다.
+- `INFRA_ROSA_SHA`·`MSA_SHA`는 3단계에서도 쓰므로 같은 CloudShell 창에서 이어서 실행합니다.
+- `BASE_LAST`가 `f618377`이 아니면 채택 SHA에서 `deploy/base`가 바뀐 것입니다. 바뀐 내용이 검토됐는지 확인하고 #6에 기록합니다.
 
 ### 2. 로그인
 
@@ -79,7 +84,7 @@ export PATH=~/pg03-rosa/bin:$PATH && oc login "<API>" -u "<본인 IdP 사용자>
 `<…>`를 위 입력값으로 바꿔 실행합니다. `API`는 2단계 `oc login`에 쓴 문자열과 **똑같이** 넣습니다(스크립트가 context의 서버 주소와 글자 그대로 비교). 결과는 `~/pg03-rosa/run-admission-<시각>/`에 남습니다.
 
 ```bash
-cd ~/pg03-rosa/infra-rosa && export PATH=~/pg03-rosa/bin:$PATH && OUT=~/pg03-rosa/run-admission-$(date -u +%Y%m%dT%H%M%SZ) && CTX="$(oc config current-context)" API="<API>" NS=fds-app PORT_ENV=ROSA EXPECTED_CLUSTER_ID="<Cluster ID>" EXPECTED_NS_UID="<fds-app UID>" MSA_DIR=~/pg03-rosa/fds-msa MSA_SHA="$(git -C ~/pg03-rosa/fds-msa rev-parse HEAD)" TX_IMAGE="<registry>/fds/transaction-api@sha256:a7093136d12640da00570c18ed278eacbb8e9ba3637c7d509571346eac45cc33" ENG_IMAGE="<registry>/fds/fds-engine@sha256:5e2a081cd51a957c3fad038b3eab07884c446ea3c2a814a905e3f41c24f67369" OUT_DIR="$OUT" bash precheck/portability/pg03-rosa-check.sh; echo "RC=$?"; echo "OUT=$OUT"
+cd ~/pg03-rosa/infra-rosa && export PATH=~/pg03-rosa/bin:$PATH && OUT=~/pg03-rosa/run-admission-$(date -u +%Y%m%dT%H%M%SZ) && CTX="$(oc config current-context)" API="<API>" NS=fds-app PORT_ENV=ROSA EXPECTED_CLUSTER_ID="<openshift_cluster_uuid>" EXPECTED_NS_UID="<fds-app UID>" MSA_DIR=~/pg03-rosa/fds-msa MSA_SHA="$MSA_SHA" TX_IMAGE="<채택 transaction-api 이미지@sha256:…>" ENG_IMAGE="<채택 fds-engine 이미지@sha256:…>" OUT_DIR="$OUT" bash precheck/portability/pg03-rosa-check.sh; echo "RC=$?"; echo "OUT=$OUT"
 ```
 
 ### 4. 결과 보기
