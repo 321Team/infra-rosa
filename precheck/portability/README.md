@@ -191,3 +191,7 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
   - 응답 형식 15건(리뷰 B4): 깨진 응답 14건이 RC11인지 확인합니다. 빈 문서, 다른 kind·apiVersion, status null·빈 객체·문자열, allowedBy 문자열·빈 name, reason 타입 오류·빈 reason, template null·배열·문자열이 여기에 들어갑니다. 나머지 1건은 template만 있는 정상 거부가 RC0인지 확인합니다
   - 모든 경우 쓰기 명령 0건을 확인합니다.
 - 상태: STATIC(`bash -n`)만 확인했습니다. MOCK 37건은 Linux 실행 결과와 원본을 PR에 연결하기 전까지 NOT RUN입니다. 과거 `728d116`의 MOCK 22건 PASS는 그 HEAD의 기록입니다. 실제 oc·kustomize 렌더와 SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
+
+## 생성 직후 실행 안내
+
+ROSA 생성 뒤 CloudShell에서 이 수집기를 돌리는 순서(oc 설치·입력값 출처·결과 해석·증적 반출)는 [RUN-ROSA-ADMISSION.md](RUN-ROSA-ADMISSION.md)에 있습니다.
