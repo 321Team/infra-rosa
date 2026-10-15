@@ -100,7 +100,8 @@ fail=0
 case_() { # name expect_rc [env...]   — 환경변수 주입은 fixture 와 실행 양쪽에 같이 적용
   local name=$1 expect=$2; shift 2
   local home="$T/h-$name" log="$T/$name.log"; : >"$log"
-  ( export "$@" 2>/dev/null; mk_fixture "$home" )
+  # 인자 없는 `export` 는 환경변수 전체를 출력한다(인증 토큰 포함) → 인자가 있을 때만 export
+  ( if [[ $# -gt 0 ]]; then export "$@"; fi; mk_fixture "$home" ) >/dev/null
   env PATH="$T/bin:$PATH" HOME="$home" MOCK_LOG="$log" CLUSTER_ID=mock-id API_URL=https://api.mock:443 \
       POLICY_FILE="$T/policy.tsv" KIT_DIR="$HERE" "$@" \
     bash "$HERE/post-revoke-check.sh" "$home/rosa-idp/ev" >/dev/null 2>"$T/$name.err"
