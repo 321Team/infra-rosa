@@ -20,7 +20,8 @@
 #   0  두 앱 모두 restricted-v2·배정 UID·portable SecurityContext·digest 일치·Ready
 #   2  입력 오류(oc 호출 전)          10 대상 불일치(서버/Cluster ID/NS UID)
 #   11 수집·파싱 오류 또는 판정 불가(조회 rc≠0, 형식 이상, Deployment·현재 ReplicaSet 누락,
-#      pod-template-hash 불일치, 앱 컨테이너 없음·중복, paused 또는 observedGeneration < generation)
+#      pod-template-hash 불일치, 앱 컨테이너 없음·중복, 승인 입력 밖 컨테이너(추가·init·ephemeral),
+#      앱 status가 정확히 1개 아님, paused 또는 observedGeneration < generation)
 #   31 SCC가 restricted-v2가 아니거나 UID가 고정값·범위 밖·미배정
 #   32 SecurityContext가 portable 계약과 다름(유효값 기준, template·live Pod 모두: UID/GID 고정,
 #      runAsNonRoot·seccomp·읽기 전용 루트·권한 상승·drop ALL 위반)
@@ -173,8 +174,13 @@ def sec_findings(where, pod_spec, live):
     return f
 
 def app_container(pod_spec, name, where):
-    """앱 컨테이너를 순서가 아니라 이름으로 정확히 1개 찾는다(보완 3)."""
-    found = [c for c in pod_spec.get('containers') or [] if c.get('name') == name]
+    """앱 컨테이너를 이름으로 정확히 1개 찾는다(보완 3).
+    현재 승인 입력은 앱마다 컨테이너 1개(TX_IMAGE/ENG_IMAGE)다. 그 밖의 container·init·ephemeral이 있으면
+    UID·이미지·digest를 결속할 승인 입력이 없으므로 판정하지 않고 멈춘다(R2)."""
+    containers = pod_spec.get('containers') or []
+    if len(containers) != 1 or pod_spec.get('initContainers') or pod_spec.get('ephemeralContainers'):
+        raise ValueError(f'{where}: container set exceeds the current approved app input')
+    found = [c for c in containers if c.get('name') == name]
     if len(found) != 1:
         raise ValueError(f'{where}: app container {name} count={len(found)}')
     return found[0]
@@ -225,7 +231,9 @@ for name, image in EXPECT.items():
         replicas = spec.get('replicas')
         if not isinstance(replicas, int) or replicas < 1:
             raise ValueError(f'replicas={replicas!r}')
-        rollout_ok = (st.get('updatedReplicas') == replicas and st.get('readyReplicas') == replicas
+        # R1: 전체 replica 수(옛 RS의 아직 남은 Pod 포함)도 원하는 수와 같아야 rollout 완료다.
+        rollout_ok = (st.get('replicas') == replicas
+                      and st.get('updatedReplicas') == replicas and st.get('readyReplicas') == replicas
                       and st.get('availableReplicas') == replicas and not st.get('unavailableReplicas')
                       and len(mine) == replicas and not terminating)
         tpl_spec = spec['template']['spec']
@@ -242,9 +250,9 @@ for name, image in EXPECT.items():
             uid = csc.get('runAsUser', (ps.get('securityContext') or {}).get('runAsUser'))
             # 보완 3: status도 순서가 아니라 이름으로 맞춘다.
             app_status = [s for s in pst.get('containerStatuses') or [] if s.get('name') == name]
-            if len(app_status) > 1:
+            if len(app_status) != 1 or len(pst.get('containerStatuses') or []) != 1:
                 raise ValueError(f"pod {pm.get('name')}: app container status count={len(app_status)}")
-            s0 = app_status[0] if app_status else {}
+            s0 = app_status[0]
             image_id = s0.get('imageID', '')
             got_digest = image_id.rsplit('@', 1)[1] if '@sha256:' in image_id else ''
             # 보완 1: Pod Ready 조건(readiness gate 포함)과 앱 컨테이너 ready를 함께 본다.

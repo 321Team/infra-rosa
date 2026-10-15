@@ -78,11 +78,17 @@ def containers(name, image, live, uid=None):
     app = {'name': name, 'image': image, 'securityContext': csc(live, uid)}
     if scenario == 'app_container_missing' and live:
         app['name'] = name + '-renamed'
-    if scenario == 'sidecar_first':        # 보완 3: 앱이 첫 번째가 아니어도 이름으로 찾아야 한다
-        side = {'name': 'sidecar', 'image': SIDE,
+    # R2: 승인 입력 밖의 추가 컨테이너. 보안 플래그는 정상이어도 판정하지 않고 멈춰야 한다(11).
+    extra = (scenario == 'sidecar_first'
+             or (scenario == 'template_extra_container' and not live)
+             or (scenario == 'live_sidecar_unapproved' and live))
+    if extra:
+        side_image = 'registry.invalid/fds/sidecar:latest' if scenario == 'live_sidecar_unapproved' else SIDE
+        side_uid = 10001 if scenario == 'live_sidecar_unapproved' else uid
+        side = {'name': 'sidecar', 'image': side_image,
                 'securityContext': {'allowPrivilegeEscalation': False, 'privileged': False,
                                     'readOnlyRootFilesystem': True, 'capabilities': {'drop': ['ALL']},
-                                    **({'runAsUser': uid} if live and uid is not None else {})}}
+                                    **({'runAsUser': side_uid} if live and side_uid is not None else {})}}
         return [side, app]
     return [app]
 
@@ -102,7 +108,8 @@ def dep(name):
             'metadata': {'name': name, 'namespace': 'fds-app', 'uid': 'dep-' + name, 'generation': 4,
                          'annotations': {'deployment.kubernetes.io/revision': '2'}},
             'spec': spec,
-            'status': {'observedGeneration': observed, 'replicas': 3, 'updatedReplicas': 3,
+            'status': {'observedGeneration': observed,
+                       'replicas': 4 if scenario == 'old_replica_lingering' and name == 'transaction-api' else 3, 'updatedReplicas': 3,
                        'readyReplicas': ready, 'availableReplicas': ready}}
 
 def rs(name, rev, suffix):
@@ -138,10 +145,18 @@ def pod(name, suffix, i, rs_suffix):
     if scenario == 'sidecar_first':        # status 순서도 앱이 뒤
         statuses.insert(0, {'name': 'sidecar', 'ready': True, 'restartCount': 0,
                             'imageID': SIDE.split('@')[0] + '@sha256:' + 'f' * 64})
+    if scenario == 'status_missing' and name == 'fds-engine':
+        statuses[0]['name'] = name + '-other'      # 앱 status 이름이 없음
+    if scenario == 'status_extra' and name == 'fds-engine':
+        statuses.append({'name': 'extra', 'ready': True, 'restartCount': 0, 'imageID': 'x'})
+    pspec = {'securityContext': {'runAsNonRoot': True, 'fsGroup': 1000680000,
+                                'seccompProfile': {'type': 'RuntimeDefault'}},
+             'containers': containers(name, IMG[name], True, uid)}
+    if scenario == 'live_init_container' and name == 'transaction-api':
+        pspec['initContainers'] = [{'name': 'init', 'image': 'registry.invalid/fds/init:latest',
+                                   'securityContext': {'runAsUser': 10001}}]
     return {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': meta,
-            'spec': {'securityContext': {'runAsNonRoot': True, 'fsGroup': 1000680000,
-                                         'seccompProfile': {'type': 'RuntimeDefault'}},
-                     'containers': containers(name, IMG[name], True, uid)},
+            'spec': pspec,
             'status': {'phase': 'Running',
                        'conditions': [{'type': 'Ready', 'status': 'True' if pod_ready else 'False'}],
                        'containerStatuses': statuses}}
@@ -250,9 +265,14 @@ grep -q '^WRITE_TEST=NOT_RUN$' "$T/out-ok/observe-result.txt"
 grep -q "^COLLECTOR_SHA256=$(sha256sum "$SCRIPT" | cut -d' ' -f1)$" "$T/out-ok/context.txt"
 (cd "$T/out-ok" && sha256sum -c --quiet SHA256SUMS)
 
-# 보완 3: 사이드카가 앞에 있어도 앱 컨테이너·status를 이름으로 찾아 정상 판정
-check sidecar_first 0 yes SCENARIO=sidecar_first
-summary_is sidecar_first OBSERVED_AS_EXPECTED
+# R1: 옛 ReplicaSet Pod가 아직 남아 전체 replica 4 → rollout 미완료
+check old_replica_lingering 30 yes SCENARIO=old_replica_lingering
+summary_is old_replica_lingering NOT_READY
+
+# R2·status: 승인 입력(앱마다 컨테이너 1개) 밖이면 판정하지 않고 멈춤
+for s in sidecar_first template_extra_container live_sidecar_unapproved live_init_container status_missing status_extra; do
+  check "$s" 11 yes SCENARIO="$s"; summary_is "$s" COLLECTION_ERROR
+done
 
 # 기존 OUT_DIR는 덮어쓰지 않음
 check reuse 2 no SCENARIO=ok OUT_DIR="$T/out-ok"
