@@ -25,11 +25,22 @@ fail=0
 log() { printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*" >&2; }
 rec() { printf '%s\t%s\t%s\t%s\t%s\n' "$@" >>"$EV/results.tsv"; [[ "$3" == "$4" ]] || { log "FAIL $1 expect=$3 got=$4"; fail=1; }; }
 
-# 요청 분류: ALLOW / DENY(403) / UNAUTH(401) / OTHER
+# 새 로그인 세션 kubeconfig 는 결과와 관계없이 항상 logout·삭제(PR#40 보완 1).
+# 회수 전 세션(OLD)은 정상 경로 끝에서 지우고, CLEANUP_REQUIRED 로 멈춘 경우에만 조사용으로 남긴다(README 실행 카드).
+cleanup_new() {
+  if [[ -f "$NEW" ]]; then KUBECONFIG="$NEW" oc logout >/dev/null 2>&1 || true; fi
+  rm -f -- "$NEW"
+  [[ ! -e "$NEW" ]] || log "CLEANUP_REQUIRED: 새 세션 kubeconfig 삭제 실패($NEW)"
+}
+trap cleanup_new EXIT
+
+# 요청 분류: ALLOW / DENY(RBAC 403) / UNAUTH(401) / OTHER
+# DENY 는 "(Forbidden)" 만으로 인정하지 않고 RBAC 거부 문장(User "<U>" cannot <verb> resource "...")일 때만(PR#40 보완 5).
 cls() {
   local rc=$1 errf=$2
   if [[ $rc -eq 0 ]]; then echo ALLOW
-  elif grep -q '(Forbidden)' "$errf"; then echo DENY
+  elif grep -q '(Forbidden)' "$errf" && grep -qF "User \"$U\" cannot " "$errf" \
+       && grep -qE 'cannot [a-z]+ resource "' "$errf"; then echo DENY
   elif grep -Eq 'Unauthorized|must be logged in' "$errf"; then echo UNAUTH
   else echo OTHER; fi
 }
@@ -54,6 +65,21 @@ cani() { # id kubeconfig -- can-i args (정확한 no 만 PASS)
 
 [[ -f "$OLD" ]] || { log "STOP: 회수 전 세션 kubeconfig 없음($OLD) — D-11b 판정 불가"; exit 1; }
 
+# 대상 대조(PR#40 보완 3): 이 판정이 bootstrap 회차와 같은 클러스터·API·사용자에 대한 것인지 먼저 확인한다.
+printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nBOOT_EV=%s\nCHECKED_AT=%s\n' \
+  "$CLUSTER_ID" "$API_URL" "$U" "$BOOT_EV" "$(date '+%FT%T%z')" >"$EV/00-target.env"
+tgt="$BOOT_EV/00-target.env"
+[[ -f "$tgt" ]] || { log "STOP: bootstrap 대상 기록 없음($tgt)"; exit 1; }
+for kv in "CLUSTER_ID=$CLUSTER_ID" "API_URL=$API_URL" "USER=$U"; do
+  grep -qxF "$kv" "$tgt" || { log "STOP: bootstrap 회차와 대상 불일치(${kv%%=*}) — $tgt"; exit 1; }
+done
+srv=$(cat "$BOOT_EV/10b-inventory/server.txt" 2>/dev/null || true)
+[[ "$srv" == "$API_URL" ]] || { log "STOP: ⑩-b 수집 server($srv) ≠ API_URL"; exit 1; }
+api=$(rosa describe cluster -c "$CLUSTER_ID" -o json | jq -er '.api.url') \
+  || { log "STOP: CLUSTER_ID 조회 실패"; exit 1; }
+[[ "$api" == "$API_URL" ]] || { log "STOP: CLUSTER_ID 의 API URL($api) ≠ API_URL"; exit 1; }
+rec TARGET "bootstrap 대상·⑩-b server·describe api.url 일치" match match -
+
 # D-11b — 회수 전 세션으로 비파괴 관리자 요청. 2xx 면 즉시 CLEANUP_REQUIRED.
 run D-11b "$OLD" 'DENY|UNAUTH' -- oc get nodes
 if [[ "$LAST" == ALLOW ]]; then log "CLEANUP_REQUIRED: 회수 전 세션이 아직 관리자 권한을 가짐"; exit 1; fi
@@ -65,6 +91,15 @@ rec D-11a-who whoami "$U" "$w" 0
 rec D-11a-server server "$API_URL" "$s" 0
 run D-11a-nodes "$NEW" DENY  -- oc get nodes
 run D-11a-ns    "$NEW" ALLOW -- oc get pods -n fds-app
+
+# 대상 대조 2(보완 3): 새 세션에서 보이는 3개 project UID = bootstrap ⑤에서 기록한 namespace UID
+# (project UID 는 namespace UID 와 같다. [AFTER-CREATE] ROSA 에서 project get 이 namespace admin 에게 허용되는지 첫 실행에서 확인)
+for ns in fds-app monitoring-api ci-cd; do
+  want=$(awk -v n="$ns" '$1 == n { print $2 }' "$BOOT_EV/05-ns-uid.txt" 2>/dev/null || true)
+  rc=0; got=$(KUBECONFIG="$NEW" oc get project "$ns" -o jsonpath='{.metadata.uid}' 2>"$EV/uid-$ns.err") || rc=$?
+  [[ $rc -eq 0 && -n "$want" ]] || got="UNKNOWN(rc=$rc)"
+  rec "TARGET-uid-$ns" "project uid = bootstrap ⑤" "${want:-missing}" "$got" "$rc"
+done
 
 # D-11c ② — 새 세션 SSAR(그룹 포함 실제 권한 평가)
 cani D-11c-all  "$NEW" -- '*' '*' --all-namespaces

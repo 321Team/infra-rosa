@@ -109,8 +109,14 @@ cleanup() {
       rc=1
     fi
   fi
-  if ! rm -f -- "$WORKDIR/t"; then
+  # SA token 원문(t)과 SA 전용 kubeconfig 는 성공·실패와 관계없이 항상 지운다(PR#40 보완 1).
+  # 하영 세션 kubeconfig 는 남긴다 — post-revoke-check.sh 의 D-11b(회수 전 세션) 판정 뒤 그 스크립트가 지운다.
+  if ! rm -f -- "$WORKDIR/t" "$WORKDIR/sa.kubeconfig"; then
     log "CLEANUP_REQUIRED: token 임시 파일 삭제 실패"
+    rc=1
+  fi
+  if [[ -e "$WORKDIR/t" || -e "$WORKDIR/sa.kubeconfig" ]]; then
+    log "CLEANUP_REQUIRED: token 임시 파일이 남아 있음"
     rc=1
   fi
   # 회수 성공이어도 원래 실패/취소 rc 는 보존한다(0 으로 덮지 않음).

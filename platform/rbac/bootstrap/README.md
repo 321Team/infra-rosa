@@ -84,6 +84,9 @@ rosa list users -c <id>
 | API 인증서 CA | ⑩ SA kubeconfig | 하영 세션 kubeconfig의 CA를 그대로 씀. TLS 검증 해제 없음 |
 | 승인 Route host | `ROUTE_HOST` → A-09 | #4 Handoff 2 이후. 그 전에는 A-09 NOT_RUN 기록 |
 | UWM 활성 여부 | ④ | 읽기만. 활성화는 범위 밖 |
+| RBAC 거부 메시지 형식 | `steps.sh` `_classify`, `post-revoke-check.sh` `cls` | `User "<주체>" cannot <verb> resource "<res>"` 문장이 실제 ROSA 4.22 응답에 있는지 첫 실행 `req/*.err`로 확인. 다르면 OTHER → STOP(정상 거부로 통과시키지 않음) → 형식 갱신은 리뷰 |
+| `system:authenticated(:oauth)` 대상 기본 binding 목록 | `steps.sh` ⑩-b `PLATFORM_DEFAULT_ROLES` | 목록에 없는 기본 binding 이 있으면 UNEXPECTED → 회수 전 STOP. 목록 추가는 리뷰를 거친다(자동 수용 안 함) |
+| namespace admin 의 `oc get project <ns>` 허용 | `post-revoke-check.sh` TARGET-uid | 허용 안 되면 UID 대조가 UNKNOWN → FAIL. 그때는 대조 방법을 바꿔 리뷰 |
 | D-10 (만료 token 401) | 별도 | 15분 대기가 필요해 bootstrap 창 밖에서 별도 기록 |
 
 ## MOCK 실행 (비용 없음, 클라우드 호출 없음, jq 필요)

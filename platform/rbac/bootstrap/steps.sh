@@ -8,21 +8,28 @@
 # token 취급: 원문을 명령 인자·로그·증적에 넣지 않는다. 파일(umask 077, 700 디렉터리)과
 #             bash 내장(printf, $(<file))로만 다루고, 배포 SA 시험은 SA 전용 kubeconfig 로 한다.
 
-# 실제 요청 결과 분류: ALLOW(rc0) / DENY(Forbidden) / OTHER(그 밖의 오류 — 판정 불가로 STOP)
+SA_IDENT="system:serviceaccount:ci-cd:fds-deployer"
+
+# 실제 요청 결과 분류: ALLOW(rc0) / DENY(RBAC 거부) / OTHER(그 밖의 오류 — 판정 불가로 STOP)
+# DENY 는 "(Forbidden)" 만으로 인정하지 않는다(PR#40 보완 5). quota·admission webhook 거부도 403 Forbidden 이라
+# 권한이 있는데 다른 이유로 막힌 것을 '정상 거부'로 오판할 수 있다. RBAC 거부 문장
+#   User "<identity>" cannot <verb> resource "<resource>"
+# 이 정확한 주체로 있을 때만 DENY. [AFTER-CREATE] 실제 ROSA 4.22 거부 메시지 형식을 첫 실행 증적으로 확인.
 _classify() {
-  local rc=$1 errf=$2
+  local rc=$1 errf=$2 ident=$3
   if [[ $rc -eq 0 ]]; then echo ALLOW
-  elif grep -q '(Forbidden)' "$errf"; then echo DENY
+  elif grep -q '(Forbidden)' "$errf" && grep -qF "User \"$ident\" cannot " "$errf" \
+       && grep -qE 'cannot [a-z]+ resource "' "$errf"; then echo DENY
   else echo OTHER; fi
 }
 
-# expect <id> <ALLOW|DENY> <subject> -- <command...>
+# expect <id> <ALLOW|DENY> <identity> -- <command...>
 #   기대와 다르면 STOP(return 1 → 회수). 결과는 $EV/results.tsv, 원본은 $EV/req/<id>.{out,err}.
 expect() {
   local id=$1 want=$2 subj=$3; shift 4
   local out="$EV/req/$id.out" err="$EV/req/$id.err" rc=0 got
   "$@" >"$out" 2>"$err" || rc=$?
-  got=$(_classify "$rc" "$err")
+  got=$(_classify "$rc" "$err" "$subj")
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$subj" "$*" "$want" "$got" "$rc" >>"$EV/results.tsv"
   [[ "$got" == "$want" ]] || { log "STOP: $id expect=$want got=$got rc=$rc"; return 1; }
 }
@@ -64,11 +71,18 @@ run_steps() {
   [[ "$(oc whoami)" == "$U" ]] || { log "STOP: whoami 불일치"; return 1; }
   [[ "$(oc whoami --show-server)" == "$API_URL" ]] || { log "STOP: server 불일치"; return 1; }
   ( cd "$MANIFEST_DIR" && sha256sum namespaces.yaml rbac.yaml human-bindings.yaml ) >"$EV/00-manifest-sha256.txt"
+  # 대상 기록(PR#40 보완 3): post-revoke-check.sh 가 이 회차의 클러스터·API·사용자와 같은지 대조한다.
+  printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nSTARTED_AT=%s\n' \
+    "$CLUSTER_ID" "$API_URL" "$U" "$(date '+%FT%T%z')" >"$EV/00-target.env"
 
   # ④ 기본 상태 읽기(쓰기 없음). [AFTER-CREATE] dedicated-admins·cluster-admins 그룹 실제 이름, UWM 활성 여부
+  # 없을 수 있는 두 항목은 실패해도 멈추지 않되, 실패 사실과 rc 를 반드시 기록한다(PR#40 보완 4 — 조용히 넘기지 않음).
   oc get groups -o yaml >"$EV/04-groups.yaml"
-  oc get clusterrolebinding self-provisioners -o yaml >"$EV/04-self-provisioners.yaml" 2>&1 || true  # 없으면 그 사실 기록
-  oc get pods -n openshift-user-workload-monitoring -o wide >"$EV/04-uwm-pods.txt" 2>&1 || true
+  local r
+  r=0; oc get clusterrolebinding self-provisioners -o yaml >"$EV/04-self-provisioners.yaml" 2>&1 || r=$?
+  printf 'self-provisioners rc=%s\n' "$r" >>"$EV/04-read-rc.txt"
+  r=0; oc get pods -n openshift-user-workload-monitoring -o wide >"$EV/04-uwm-pods.txt" 2>&1 || r=$?
+  printf 'uwm-pods rc=%s\n' "$r" >>"$EV/04-read-rc.txt"
 
   # ⑤ Namespace + UID
   oc apply -f "$MANIFEST_DIR/namespaces.yaml"
@@ -146,44 +160,53 @@ run_steps() {
     printf 'contexts:\n- name: sa\n  context: {cluster: rosa, user: fds-deployer, namespace: fds-app}\n'
     printf 'current-context: sa\n'
   } >"$WORKDIR/sa.kubeconfig"
-  [[ "$(_sa whoami)" == "system:serviceaccount:ci-cd:fds-deployer" ]] || { log "STOP: SA 세션 identity 불일치"; return 1; }
+  [[ "$(_sa whoami)" == "$SA_IDENT" ]] || { log "STOP: SA 세션 identity 불일치"; return 1; }
 
-  # 허용(A)·거부(D) — 실제 SA token 요청. 쓰기는 --dry-run=server.
-  expect A-01 ALLOW fds-deployer -- _sa create deployment a01-probe --image=registry.invalid/probe:0 -n fds-app --dry-run=server
-  expect A-03 ALLOW fds-deployer -- _sa get pods -n fds-app
-  expect A-04 ALLOW fds-deployer -- _sa create route edge a04-probe --service=none -n fds-app --dry-run=server
+  # 허용(A)·거부(D) — 실제 SA token 요청. 쓰기는 --dry-run=server. DENY 는 이 SA 주체의 RBAC 거부 문장일 때만 인정.
+  local S="$SA_IDENT"
+  expect A-01 ALLOW "$S" -- _sa create deployment a01-probe --image=registry.invalid/probe:0 -n fds-app --dry-run=server
+  expect A-03 ALLOW "$S" -- _sa get pods -n fds-app
+  expect A-04 ALLOW "$S" -- _sa create route edge a04-probe --service=none -n fds-app --dry-run=server
   if [[ -n "${ROUTE_HOST:-}" ]]; then
-    expect A-09 ALLOW fds-deployer -- _sa create route edge a09-probe --service=none --hostname="$ROUTE_HOST" -n fds-app --dry-run=server
+    expect A-09 ALLOW "$S" -- _sa create route edge a09-probe --service=none --hostname="$ROUTE_HOST" -n fds-app --dry-run=server
   else
-    printf 'A-09\tfds-deployer\troute custom-host create\tALLOW\tNOT_RUN(승인 host PENDING)\t-\n' >>"$EV/results.tsv"
+    printf 'A-09\t%s\troute custom-host create\tALLOW\tNOT_RUN(승인 host PENDING)\t-\n' "$S" >>"$EV/results.tsv"
   fi
-  expect D-01   DENY fds-deployer -- _sa create deployment d01-probe --image=registry.invalid/probe:0 -n monitoring-api --dry-run=server
-  expect D-02a  DENY fds-deployer -- _sa get pods -n openshift-monitoring
-  expect D-03a  DENY fds-deployer -- _sa get secrets -n fds-app
-  expect D-04   DENY fds-deployer -- _sa delete deployment d04-probe -n fds-app --dry-run=server
-  expect_cani D-05 no fds-deployer -- _sa auth can-i create pods/exec -n fds-app
-  expect D-06a  DENY fds-deployer -- _sa create rolebinding d06-probe --clusterrole=view --user=nobody -n fds-app --dry-run=server
-  expect D-06d  DENY fds-deployer -- _token_probe
-  expect D-07a  DENY fds-deployer -- _sa get nodes
-  expect D-07b  DENY fds-deployer -- _sa create namespace d07-probe --dry-run=server
-  expect D-07c  DENY fds-deployer -- _sa get securitycontextconstraints restricted-v2
-  expect D-12a  DENY fds-deployer -- _sa create serviceaccount d12-probe -n fds-app --dry-run=server
-  expect D-12b  DENY fds-deployer -- _np_probe
-  expect D-13c  DENY fds-deployer -- _sa create route edge d13-probe --service=none --hostname=probe.invalid -n monitoring-api --dry-run=server
-  expect_cani MON-D-14 no fds-deployer -- _sa auth can-i create servicemonitors.monitoring.coreos.com -n fds-app
-  rm -f -- "$WORKDIR/sa.kubeconfig"   # 시험 끝 — SA token 이 든 파일 정리(t 는 래퍼 cleanup 이 지움)
+  expect D-01   DENY "$S" -- _sa create deployment d01-probe --image=registry.invalid/probe:0 -n monitoring-api --dry-run=server
+  expect D-02a  DENY "$S" -- _sa get pods -n openshift-monitoring
+  expect D-03a  DENY "$S" -- _sa get secrets -n fds-app
+  expect D-04   DENY "$S" -- _sa delete deployment d04-probe -n fds-app --dry-run=server
+  expect_cani D-05 no "$S" -- _sa auth can-i create pods/exec -n fds-app
+  expect D-06a  DENY "$S" -- _sa create rolebinding d06-probe --clusterrole=view --user=nobody -n fds-app --dry-run=server
+  expect D-06d  DENY "$S" -- _token_probe
+  expect D-07a  DENY "$S" -- _sa get nodes
+  expect D-07b  DENY "$S" -- _sa create namespace d07-probe --dry-run=server
+  expect D-07c  DENY "$S" -- _sa get securitycontextconstraints restricted-v2
+  expect D-12a  DENY "$S" -- _sa create serviceaccount d12-probe -n fds-app --dry-run=server
+  expect D-12b  DENY "$S" -- _np_probe
+  expect D-13c  DENY "$S" -- _sa create route edge d13-probe --service=none --hostname=probe.invalid -n monitoring-api --dry-run=server
+  expect_cani MON-D-14 no "$S" -- _sa auth can-i create servicemonitors.monitoring.coreos.com -n fds-app
+  rm -f -- "$WORKDIR/sa.kubeconfig"   # 정상 경로 정리. 실패로 중간에 끝나도 래퍼 cleanup 이 t·sa.kubeconfig 를 지운다(보완 1)
   # D-10(실제 만료 후 401)은 15분 대기가 필요해 bootstrap 창 밖, post-revoke-check.sh 이후 별도 기록.
 
   # ⑩-b 권한 목록 저장(R2) — 회수 전에 반드시. 승인 경로 외가 있으면 회수 전에 STOP.
   bash "$KIT_DIR/collect-access-inventory.sh" "$EV/10b-inventory"
-  # 분류: APPROVED(3개 ns admin) / REVOKE_TARGET(cluster-admins 그룹, ⑪에서 회수) /
-  #       PLATFORM_DEFAULT(system:authenticated(:oauth) 그룹 대상, 관측 기록) / UNEXPECTED(→ STOP)
-  # [AFTER-CREATE] ROSA 의 cluster-admins 그룹·binding 실제 이름 확인. 다르면 STOP 후 정의 갱신·리뷰.
-  awk -F'\t' '!/^#/ {
+  # 분류(PR#40 보완 2 — 주체만 보고 통과시키지 않고 roleRef 까지 정확히 대조):
+  #   APPROVED        3개 ns 의 hayeoung-admin = ClusterRole/admin, 주체가 정확히 User:hayeoung
+  #                   (+ ⑮ 회차 뒤에만 존재하는 fds-app hayeoung-monitoring-edit = ClusterRole/monitoring-edit)
+  #   REVOKE_TARGET   ClusterRole/cluster-admin 이고 주체가 정확히 Group:cluster-admins(⑪에서 회수)
+  #   PLATFORM_DEFAULT 주체가 system:authenticated(:oauth) 그룹뿐이고 roleRef 가 아래 저권한 ClusterRole 목록에 있을 때만
+  #   UNEXPECTED      그 밖의 모든 경로(예: authenticated 에 붙은 cluster-admin) → 회수 전 STOP
+  # [AFTER-CREATE] ROSA 4.22 의 cluster-admins 그룹·binding 실제 이름, authenticated 대상 기본 binding 목록을 첫 실행 증적으로
+  #   확인한다. 목록에 없는 기본 binding 이 나오면 STOP → 목록 갱신은 리뷰를 거친다(자동 수용하지 않음).
+  local pd="${PLATFORM_DEFAULT_ROLES:-self-provisioner basic-user cluster-status system:basic-user system:discovery system:public-info-viewer system:openshift:public-info-viewer system:oauth-token-deleter system:scope-impersonation system:webhook system:openshift:discovery}"
+  awk -F'\t' -v pd="$pd" -v u="$U" 'BEGIN { n = split(pd, a, " "); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
+    !/^#/ {
       c = "UNEXPECTED"
-      if ($1 != "cluster" && $2 == "hayeoung-admin" && $3 == "ClusterRole" && $4 == "admin") c = "APPROVED"
-      else if ($5 == "Group:cluster-admins") c = "REVOKE_TARGET"
-      else if ($5 ~ /^Group:system:authenticated(:oauth)?(,Group:system:authenticated(:oauth)?)*$/) c = "PLATFORM_DEFAULT"
+      if ($1 != "cluster" && $2 == "hayeoung-admin" && $3 == "ClusterRole" && $4 == "admin" && $5 == "User:" u) c = "APPROVED"
+      else if ($1 == "fds-app" && $2 == "hayeoung-monitoring-edit" && $3 == "ClusterRole" && $4 == "monitoring-edit" && $5 == "User:" u) c = "APPROVED"
+      else if ($1 == "cluster" && $3 == "ClusterRole" && $4 == "cluster-admin" && $5 == "Group:cluster-admins") c = "REVOKE_TARGET"
+      else if ($3 == "ClusterRole" && ($4 in ok) && $5 ~ /^Group:system:authenticated(:oauth)?(,Group:system:authenticated(:oauth)?)*$/) c = "PLATFORM_DEFAULT"
       print c "\t" $0
     }' "$EV/10b-inventory/access-paths-$U.tsv" >"$EV/10b-path-review.tsv"
   if grep -q '^UNEXPECTED' "$EV/10b-path-review.tsv"; then

@@ -37,7 +37,8 @@ EOF
 cat >"$T/bin/oc" <<'EOF'
 #!/usr/bin/env bash
 echo "oc $*" >>"$MOCK_LOG"
-deny() { echo "Error from server (Forbidden): mock deny: $*" >&2; exit 1; }
+# 실제 RBAC 거부 형식: ... is forbidden: User "<주체>" cannot <verb> resource "<res>" ...
+deny() { echo "Error from server (Forbidden): mock is forbidden: User \"system:serviceaccount:ci-cd:fds-deployer\" cannot get resource \"mock\" in API group \"\"" >&2; exit 1; }
 
 # ── 배포 SA 세션(steps.sh 의 _sa = --kubeconfig=.../sa.kubeconfig): Role 대로 허용, 나머지 403
 if [[ "${1:-}" == --kubeconfig=*sa.kubeconfig ]]; then
@@ -47,6 +48,12 @@ if [[ "${1:-}" == --kubeconfig=*sa.kubeconfig ]]; then
     "auth can-i "*) echo no; exit 1 ;;
     "get pods -n fds-app") exit 0 ;;
     "get secrets -n fds-app") [[ "${MOCK_SA_LEAK:-0}" == 1 ]] && exit 0; deny "$a" ;;   # 26: 권한 누수 주입
+    # 30: RBAC 이 아닌 이유(quota)의 403 — 권한이 있는데 다른 이유로 막힌 것을 '정상 거부'로 보면 안 됨(보완 5)
+    "create deployment d01-probe "*)
+      if [[ "${MOCK_SA_QUOTA:-0}" == 1 ]]; then
+        echo 'Error from server (Forbidden): deployments.apps "d01-probe" is forbidden: exceeded quota: compute-resources' >&2; exit 1
+      fi
+      deny "$a" ;;
     "create deployment "*"-n fds-app --dry-run=server") exit 0 ;;
     "create route edge a04-probe "*) exit 0 ;;
     *) deny "$a" ;;
@@ -91,6 +98,8 @@ case "$*" in
   "get clusterrolebindings -o json")
     extra=""
     [[ "${MOCK_INV_UNEXPECTED:-0}" == 1 ]] && extra=',{"metadata":{"name":"hidden-direct"},"roleRef":{"kind":"ClusterRole","name":"sudoer"},"subjects":[{"kind":"User","name":"hayeoung"}]}'
+    # 31: 로그인한 모든 사람에게 cluster-admin — 주체만 보면 '플랫폼 기본'처럼 보이는 위험 경로(보완 2)
+    [[ "${MOCK_INV_AUTH_ADMIN:-0}" == 1 ]] && extra=',{"metadata":{"name":"authenticated-admin"},"roleRef":{"kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"Group","name":"system:authenticated"}]}'
     echo '{"items":[{"metadata":{"name":"cluster-admins"},"roleRef":{"kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"Group","name":"cluster-admins"}]},
       {"metadata":{"name":"self-provisioners"},"roleRef":{"kind":"ClusterRole","name":"self-provisioner"},"subjects":[{"kind":"Group","name":"system:authenticated:oauth"}]}'"$extra"']}' ;;
   "get rolebindings -n "*" -o json")
@@ -124,7 +133,7 @@ run_case() { # name steps expect_rc [env...]
   [[ "$steps" == deadline ]] && dl=$(( $(date +%s) + 2 ))
   local pre=()
   if [[ "${USE_SETSID:-0}" == 1 ]]; then
-    if setsid --help 2>&1 | grep -q -- '--wait'; then pre=(setsid --wait)
+    if [[ "${FORCE_SKIP_SETSID:-0}" != 1 ]] && setsid --help 2>&1 | grep -q -- '--wait'; then pre=(setsid --wait)
     else printf '%-26s => SKIP (setsid --wait 없음 — Linux 에서 실행 필요)\n' "$name"; skipped=1; return; fi
   fi
   "${pre[@]}" env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" \
@@ -142,11 +151,14 @@ run_case() { # name steps expect_rc [env...]
   local fe=0; [[ -n "${FORBID_ERR:-}" ]] && fe=$(grep -Ec "$FORBID_ERR" "$T/$name.err" || true)
   local rcok=0   # expect 가 nonzero 면 0 이 아닌 모든 rc 를 인정(신호 종료 rc 는 환경마다 다를 수 있음)
   if [[ "$expect" == nonzero ]]; then [[ $rc != 0 ]] && rcok=1; else [[ $rc == "$expect" ]] && rcok=1; fi
+  # 보완 1: 어떤 경우든 끝난 뒤 SA token 원문·SA kubeconfig 가 남으면 FAIL
+  local left=0 f
+  for f in t sa.kubeconfig; do [[ -e "$T/home-$name/rosa-idp/$f" ]] && left=$((left + 1)); done
   local ok=PASS
-  [[ $rcok == 1 && $after == 0 && $granted == "${EXP_GRANT:-1}" && $revoked == "${EXP_REVOKE:-1}" && $forbid == 0 && $req -ge 1 && $fe == 0 ]] || ok=FAIL
+  [[ $rcok == 1 && $after == 0 && $granted == "${EXP_GRANT:-1}" && $revoked == "${EXP_REVOKE:-1}" && $forbid == 0 && $req -ge 1 && $fe == 0 && $left == 0 ]] || ok=FAIL
   [[ "$ok" == PASS ]] || failures=1
-  printf '%-26s rc=%-3s expect=%-3s after=%s grant=%s revoke=%s forbidden=%s CLEANUP_REQUIRED=%s dir_perm=%s => %s\n' \
-    "$name" "$rc" "$expect" "$after" "$granted" "$revoked" "$forbid" "$cr" "$perm" "$ok"
+  printf '%-26s rc=%-3s expect=%-3s after=%s grant=%s revoke=%s forbidden=%s token_files_left=%s CLEANUP_REQUIRED=%s dir_perm=%s => %s\n' \
+    "$name" "$rc" "$expect" "$after" "$granted" "$revoked" "$forbid" "$left" "$cr" "$perm" "$ok"
 }
 
 echo "bash $BASH_VERSION / $(uname -s) / jq $(jq --version 2>/dev/null || echo MISSING)"
@@ -190,6 +202,28 @@ USE_SETSID=1 REQUIRE_ERR='REVOKE_VERIFIED' run_case 29_ctrl_c_during_revoke norm
 grep -v "^  trap '' INT TERM$" "$HERE/bootstrap-session.sh" >"$T/wrapper-nofix.sh"
 WRAPPER="$T/wrapper-nofix.sh" USE_SETSID=1 FORBID_ERR='REVOKE_VERIFIED' run_case 29b_without_fix_dies normal nonzero MOCK_INT_DURING_REVOKE=1
 
+# PR#40 보완 5: RBAC 이 아닌 403(quota)을 '정상 거부'로 보지 않음 → D-01 에서 STOP
+run_case 30_quota_403_not_rbac_deny template 1 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
+# 대조(30b): 'Forbidden' 만 보던 수정 전 분류는 같은 주입을 정상 거부로 보고 끝까지 통과해 버린다
+perl -0pe 's/elif grep -q \x27\(Forbidden\)\x27 "\$errf" && grep -qF [^\n]*\n[^\n]*then echo DENY/elif grep -q \x27(Forbidden)\x27 "\$errf"; then echo DENY/' "$HERE/steps.sh" >"$T/nofix5.sh"
+cmp -s "$HERE/steps.sh" "$T/nofix5.sh" && { echo "FAIL: 30b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+run_case 30b_without_fix_passes nofix5 0 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
+# PR#40 보완 2: 로그인한 모든 사람에게 cluster-admin 이 붙은 경로는 '플랫폼 기본'이 아님 → 회수 전 STOP
+run_case 31_auth_group_admin_stops template 1 MOCK_TOKEN=1 MOCK_INV_AUTH_ADMIN=1
+# 대조(31b): roleRef 를 보지 않던 수정 전 분류는 같은 경로를 PLATFORM_DEFAULT 로 통과시킨다
+perl -pe 's/ && \(\$4 in ok\)//' "$HERE/steps.sh" >"$T/nofix2.sh"
+cmp -s "$HERE/steps.sh" "$T/nofix2.sh" && { echo "FAIL: 31b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+run_case 31b_without_fix_passes nofix2 0 MOCK_TOKEN=1 MOCK_INV_AUTH_ADMIN=1
+# 보완 3·4: 정상 실행(25)의 증적에 대상 기록이 있고, 없을 수 있는 읽기의 rc 가 기록돼 있어야 함
+ev25=$(ls -d "$T"/home-25_steps_full_success/rosa-idp/evidence-* 2>/dev/null | head -1)
+ok=PASS
+grep -qx 'CLUSTER_ID=mock-id' "$ev25/00-target.env" 2>/dev/null && grep -qx 'USER=hayeoung' "$ev25/00-target.env" || ok=FAIL
+[[ $(grep -c ' rc=' "$ev25/04-read-rc.txt" 2>/dev/null) == 2 ]] || ok=FAIL
+grep -q $'^REVOKE_TARGET\tcluster\tcluster-admins' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
+grep -q $'^PLATFORM_DEFAULT\tcluster\tself-provisioners' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
+[[ "$ok" == PASS ]] || failures=1
+printf '%-26s target.env·read-rc·path-review 분류 확인 => %s\n' 25x_evidence_checks "$ok"
+
 # 10: 로그를 파이프(tee)로 받을 때 watchdog 가 파이프를 붙잡지 않는지(마감 600초인데 즉시 끝나야 함)
 : >"$T/10.log"; start=$(date +%s)
 env PATH="$T/bin:$PATH" MOCK_LOG="$T/10.log" HOME="$T/home-10" CLUSTER_ID=mock-id API_URL=https://api.mock:443 \
@@ -199,5 +233,7 @@ rc=${PIPESTATUS[0]}; el=$(( $(date +%s) - start ))
 ok=PASS
 [[ $rc == 0 && $el -lt 20 ]] || { ok=FAIL; failures=1; }
 printf '%-22s rc=%-3s elapsed=%ss (deadline 600s) => %s\n' 10_pipe_no_hang "$rc" "$el" "$ok"
-[[ $skipped == 1 ]] && echo "NOTE: SKIP 있음 — Linux(setsid --wait)에서 다시 실행해야 전체 판정 가능"
-exit "$failures"
+# 보완 4: SKIP(미실행)을 성공(rc0)으로 보이게 하지 않는다. FAIL → rc1, FAIL 없이 SKIP 만 → rc2, 전부 PASS → rc0
+if [[ $failures != 0 ]]; then exit 1; fi
+if [[ $skipped == 1 ]]; then echo "RESULT: SKIP 있음(rc2) — Linux(setsid --wait)에서 다시 실행해야 전체 판정 가능"; exit 2; fi
+exit 0
