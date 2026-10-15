@@ -191,3 +191,35 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
   - 응답 형식 15건(리뷰 B4): 깨진 응답 14건이 RC11인지 확인합니다. 빈 문서, 다른 kind·apiVersion, status null·빈 객체·문자열, allowedBy 문자열·빈 name, reason 타입 오류·빈 reason, template null·배열·문자열이 여기에 들어갑니다. 나머지 1건은 template만 있는 정상 거부가 RC0인지 확인합니다
   - 모든 경우 쓰기 명령 0건을 확인합니다.
 - 상태: STATIC(`bash -n`)만 확인했습니다. MOCK 37건은 Linux 실행 결과와 원본을 PR에 연결하기 전까지 NOT RUN입니다. 과거 `728d116`의 MOCK 22건 PASS는 그 HEAD의 기록입니다. 실제 oc·kustomize 렌더와 SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
+
+## 2026-10-15 infra-rosa#6 PG-03 실제 배포 Pod 관측 (`pg03-rosa-observe.sh`, 6-2 Runtime)
+
+admission 수집기(위 절)가 "허용될지"를 묻는다면, 이 도구는 **#43/#46이 실제로 배포한 Pod가 어떻게 떴는지**를 읽기만 해서 확인합니다. 앱을 따로 띄우지 않으므로 PR36 리뷰 B1/B2의 소유권·정리 문제가 생기지 않습니다.
+
+**하는 일(get만, 클러스터 변경 없음)**
+1. admission 수집기와 같은 대상 고정을 씁니다. context 서버·`API` 대조(첫 API 요청 전), Cluster ID·NS UID를 승인 inventory 값과 대조, System namespace 거부.
+2. `transaction-api`·`fds-engine` Deployment, 그 소유 ReplicaSet, Pod를 get합니다. **현재 revision의 ReplicaSet이 소유한 Pod만** 판정합니다. 이전 revision Pod는 뺍니다.
+3. 판정
+   - Pod 주석 `openshift.io/scc=restricted-v2`
+   - SCC가 배정한 UID가 namespace `uid-range` 안에 있고 10001이 아닐 것
+   - Deployment template이 portable일 것: UID/GID 고정 없음, `runAsNonRoot`, RuntimeDefault, 읽기 전용 루트, 권한 상승 금지, `drop ALL`
+   - live Pod의 읽기 전용 루트
+   - 이미지 참조와 `imageID` digest가 승인값과 같을 것
+   - rollout 완료와 Ready
+
+| 종료 코드 | 의미 |
+|---:|---|
+| 0 | 위 판정을 모두 만족 |
+| 2 / 10 | 입력 오류 / 대상 불일치 (admission 수집기와 같음) |
+| 11 | 수집·파싱 오류: 조회 rc≠0, 형식 이상, Deployment·현재 ReplicaSet 누락, uid-range 주석 이상 |
+| 31 | SCC가 `restricted-v2`가 아님, 또는 UID가 10001·범위 밖·미배정 |
+| 32 | SecurityContext가 portable 계약과 다름 |
+| 33 | 이미지 참조 또는 digest가 다름. 멀티아키텍처 index digest와 실행 child digest 차이일 수 있어 **사람이 확인**하고, PASS로 쓰지 않습니다 |
+| 30 | rollout 미완료 또는 Ready 아님. transaction-api Ready에는 DB 경로가 필요합니다(#43/#47) |
+
+여러 문제가 겹치면 11 > 31 > 32 > 33 > 30 순서로 종료 코드를 고르고, 행별 결과는 `observe-result.{txt,json}`에 모두 남깁니다.
+
+- **하지 않는 것:** exec·port-forward·debug를 포함한 모든 쓰기와 Pod 안 명령. 그래서 "읽기 전용 루트에서 실제 쓰기가 errno 30으로 막히는지"는 확인하지 않습니다(`WRITE_TEST=NOT_RUN`). 필요하면 exec 범위를 정해 별도로 승인받습니다.
+- **실행 시점:** #46 배포 이후, 배포 receipt의 이미지 값(`TX_IMAGE`/`ENG_IMAGE`)으로 실행합니다. 실행 권한은 `fds-app` 읽기와 `get clusterversion`입니다(admission과 같은 현장 확인 항목).
+- **MOCK 시험:** `bash precheck/portability/tests/pg03-observe-mock.sh`(Linux). 입력 거부 9, 대상 불일치 4, 수집 오류 6, 판정 분기 11(31×4, 32×3, 33×2, 30×2), 정상 1(이전 ReplicaSet Pod 제외 확인), 기존 OUT_DIR 보존 1. 모든 경우 쓰기 명령 0건, 고정되지 않은 oc 호출 0건을 확인합니다.
+- 상태: STATIC만 확인. MOCK·실제 oc·ROSA RUNTIME은 NOT RUN. PG03=HOLD.
