@@ -8,7 +8,7 @@ ROSA 생성 후 첫 설정(IdP → RBAC)에서 **임시 cluster-admin을 반드�
 | `bootstrap-session.sh` | `rosa grant user cluster-admin` → `steps.sh`의 `run_steps` → **성공·실패·INT·TERM·마감 모두** revoke → 회수 확인 → 최종 rc (회수 실패 rc=1, `CLEANUP_REQUIRED`) |
 | `steps-template.sh` | 순서 ③~⑩-b 단계 템플릿. 실행본은 manifest 경로·token 전달 방식을 채운 뒤 별도 리뷰 |
 | `collect-access-inventory.sh` | ⑩-b 권한 목록 저장(읽기 전용, bootstrap 창 안에서만) |
-| `mock-test.sh` | 래퍼 MOCK 17경우(가짜 rosa/oc, 클라우드 호출 없음). 조회 실패·형식 불명·401 을 회수 성공으로 보지 않는지 포함 |
+| `mock-test.sh` | 래퍼 MOCK 24경우(가짜 rosa/oc, 클라우드 호출 없음, jq 필요). 조회 실패·형식 불명·401, 대상 불일치 시 grant 0회, 템플릿 조회 실패 시 후속 단계 0회 포함. 하나라도 FAIL이면 전체 rc1 |
 | `mock-test-inventory.sh` | 권한 목록 저장 MOCK(가짜 oc, jq 필요). Role 규칙 namespace별 저장, 참조 부재·미지원 kind STOP 포함 |
 
 ## MOCK 실행 (비용 없음, 클라우드 호출 없음)

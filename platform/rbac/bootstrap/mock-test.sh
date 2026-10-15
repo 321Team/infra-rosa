@@ -10,6 +10,13 @@ cat >"$T/bin/rosa" <<'EOF'
 #!/usr/bin/env bash
 echo "rosa $*" >>"$MOCK_LOG"
 case "$1 $2" in
+  "describe cluster")
+    case "${MOCK_DESCRIBE_MODE:-ok}" in
+      ok)     echo "{\"api\":{\"url\":\"${MOCK_DESCRIBE_API:-https://api.mock:443}\"}}" ;;
+      noapi)  echo '{"id":"mock-id"}' ;;                       # 형식 불명(api.url 없음)
+      broken) echo '<html>bad gateway</html>' ;;
+    esac
+    exit "${MOCK_DESCRIBE_RC:-0}" ;;
   "grant user")  exit 0 ;;
   "revoke user") exit "${MOCK_REVOKE_RC:-0}" ;;
   "list users")
@@ -33,6 +40,14 @@ if [[ "$1 $2" == "auth can-i" ]]; then
   [[ -n "${MOCK_CANI_ERR:-}" ]] && echo "$MOCK_CANI_ERR" >&2
   exit "$rc"
 fi
+# steps-template.sh 실행용 응답(F2 시험). 그 밖의 명령은 성공(rc0)으로 기록만.
+case "$*" in
+  "whoami") echo "${U:-hayeoung}" ;;
+  "whoami --show-server") echo "https://api.mock:443" ;;
+  "get ns "*"jsonpath="*) [[ "${MOCK_NSUID_RC:-0}" != 0 ]] && exit "$MOCK_NSUID_RC"; echo "uid-$3" ;;
+  "get sa -n "*"jsonpath="*) [[ "${MOCK_SA_RC:-0}" != 0 ]] && exit "$MOCK_SA_RC"; echo "default builder deployer" ;;
+  "create token"*) exit 93 ;;   # 실제 token 을 만들지 않도록 여기서 중단(⑩ 도달 표시)
+esac
 exit 0
 EOF
 chmod +x "$T/bin/rosa" "$T/bin/oc"
@@ -46,6 +61,12 @@ mk_steps int      'echo STEP1 >>"$MOCK_LOG"; kill -INT $$; sleep 1; echo STEP2_A
 mk_steps term     'echo STEP1 >>"$MOCK_LOG"; kill -TERM $$; sleep 1; echo STEP2_AFTER_TERM >>"$MOCK_LOG"'
 mk_steps deadline 'echo STEP1 >>"$MOCK_LOG"; for i in 1 2 3 4 5 6; do sleep 1; done; echo STEP2_AFTER_DEADLINE >>"$MOCK_LOG"'
 
+failures=0
+
+mkdir -p "$T/manifests"   # steps-template.sh 용 빈 manifest 자리(가짜 oc 는 내용을 읽지 않음)
+cp "$HERE/steps-template.sh" "$T/template.sh"
+
+# 기대값(호출 전 변수로 지정): EXP_GRANT/EXP_REVOKE(기본 1), FORBID(로그에 나오면 안 되는 정규식)
 run_case() { # name steps expect_rc [env...]
   local name=$1 steps=$2 expect=$3; shift 3
   local log="$T/$name.log"; : >"$log"
@@ -53,20 +74,25 @@ run_case() { # name steps expect_rc [env...]
   [[ "$steps" == deadline ]] && dl=$(( $(date +%s) + 2 ))
   env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" \
       CLUSTER_ID=mock-id API_URL=https://api.mock:443 DEADLINE_EPOCH="$dl" \
-      VERIFY_TRIES=2 VERIFY_INTERVAL=0 "$@" \
+      VERIFY_TRIES=2 VERIFY_INTERVAL=0 MANIFEST_DIR="$T/manifests" KIT_DIR="$HERE" "$@" \
       bash "$HERE/bootstrap-session.sh" "$T/$steps.sh" 2>"$T/$name.err"
   local rc=$?
   local after; after=$(grep -c '_AFTER_' "$log" || true)
+  local granted; granted=$(grep -c '^rosa grant' "$log" || true)
   local revoked; revoked=$(grep -c '^rosa revoke' "$log" || true)
+  local forbid=0; [[ -n "${FORBID:-}" ]] && forbid=$(grep -Ec "$FORBID" "$log" || true)
   local cr; cr=$(grep -c 'CLEANUP_REQUIRED' "$T/$name.err" || true)
   local perm; perm=$(stat -c '%a' "$T/home-$name/rosa-idp" 2>/dev/null || echo NA)
-  local ok=PASS; [[ $rc == "$expect" && $after == 0 && $revoked == 1 ]] || ok=FAIL
-  printf '%-22s rc=%-3s expect=%-3s after_step_runs=%s revoke_calls=%s CLEANUP_REQUIRED=%s dir_perm=%s => %s\n' \
-    "$name" "$rc" "$expect" "$after" "$revoked" "$cr" "$perm" "$ok"
+  local ok=PASS
+  [[ $rc == "$expect" && $after == 0 && $granted == "${EXP_GRANT:-1}" && $revoked == "${EXP_REVOKE:-1}" && $forbid == 0 ]] || ok=FAIL
+  [[ "$ok" == PASS ]] || failures=1
+  printf '%-26s rc=%-3s expect=%-3s after=%s grant=%s revoke=%s forbidden=%s CLEANUP_REQUIRED=%s dir_perm=%s => %s\n' \
+    "$name" "$rc" "$expect" "$after" "$granted" "$revoked" "$forbid" "$cr" "$perm" "$ok"
 }
 
-echo "bash $BASH_VERSION / $(uname -s)"
-run_case 1_normal          normal   0
+echo "bash $BASH_VERSION / $(uname -s) / jq $(jq --version 2>/dev/null || echo MISSING)"
+# SELFTEST_EXPECT: 하네스 자체 시험용(일부러 틀린 기대값 → 전체 rc1 이어야 함, F3)
+run_case 1_normal          normal   "${SELFTEST_EXPECT:-0}"
 run_case 2_step_fail       fail     1
 run_case 3_int             int      130
 run_case 4_term            term     143
@@ -83,6 +109,16 @@ run_case 14_mgmt_empty_output  normal 1 MOCK_USERS_MODE=empty
 run_case 15_mgmt_broken_output normal 1 MOCK_USERS_MODE=broken
 run_case 16_mgmt_header_only   normal 0 MOCK_USERS_MODE=header
 run_case 17_session_401        normal 1 MOCK_CANI_RC=1 MOCK_CANI_ERR="error: You must be logged in to the server (Unauthorized)"
+# 리뷰 6168044536 F1: 대상 결속 실패면 grant·revoke·apply 0회
+EXP_GRANT=0 EXP_REVOKE=0 FORBID='^oc apply' run_case 18_api_mismatch     normal 1 MOCK_DESCRIBE_API=https://api.other:443
+EXP_GRANT=0 EXP_REVOKE=0 FORBID='^oc apply' run_case 19_describe_rc42     normal 1 MOCK_DESCRIBE_RC=42
+EXP_GRANT=0 EXP_REVOKE=0 FORBID='^oc apply' run_case 20_describe_no_api   normal 1 MOCK_DESCRIBE_MODE=noapi
+EXP_GRANT=0 EXP_REVOKE=0 FORBID='^oc apply' run_case 21_describe_broken   normal 1 MOCK_DESCRIBE_MODE=broken
+# 리뷰 6168044536 F2: steps-template.sh 실제 단계로, 조회 실패 뒤 후속 쓰기·token 0회 + revoke 1회
+FORBID='rbac\.yaml|human-bindings|create token' run_case 22_tmpl_nsuid_rc42 template 1 MOCK_NSUID_RC=42
+FORBID='create token'                           run_case 23_tmpl_sa_rc42    template 1 MOCK_SA_RC=42
+# 대조: 정상 template 은 ⑩(create token, 가짜 rc93)까지 도달한 뒤 회수 — 단계 연결 확인용
+run_case 24_tmpl_reaches_token template 93
 
 # 10: 로그를 파이프(tee)로 받을 때 watchdog 가 파이프를 붙잡지 않는지(마감 600초인데 즉시 끝나야 함)
 : >"$T/10.log"; start=$(date +%s)
@@ -90,5 +126,7 @@ env PATH="$T/bin:$PATH" MOCK_LOG="$T/10.log" HOME="$T/home-10" CLUSTER_ID=mock-i
     DEADLINE_EPOCH=$(( $(date +%s) + 600 )) VERIFY_TRIES=2 VERIFY_INTERVAL=0 \
     bash "$HERE/bootstrap-session.sh" "$T/normal.sh" 2>&1 | tee "$T/10.out" >/dev/null
 rc=${PIPESTATUS[0]}; el=$(( $(date +%s) - start ))
-printf '%-22s rc=%-3s elapsed=%ss (deadline 600s) => %s\n' 10_pipe_no_hang "$rc" "$el" \
-  "$([[ $rc == 0 && $el -lt 20 ]] && echo PASS || echo FAIL)"
+ok=PASS
+[[ $rc == 0 && $el -lt 20 ]] || { ok=FAIL; failures=1; }
+printf '%-22s rc=%-3s elapsed=%ss (deadline 600s) => %s\n' 10_pipe_no_hang "$rc" "$el" "$ok"
+exit "$failures"

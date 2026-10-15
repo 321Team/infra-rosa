@@ -2,6 +2,7 @@
 # 첫 설정 순서 v3 ③~⑩-b. manifest 경로·값은 실행 승인본으로 채운 뒤 SHA 를 기록한다.
 # 어느 명령이든 실패하면 set -e 로 즉시 cleanup(회수)으로 간다. 다음 단계는 실행되지 않는다.
 run_steps() {
+  local ns sa uid sa_names
   local ev="$WORKDIR/evidence-$(date +%Y%m%dT%H%M%S)"
   mkdir -p "$ev"
 
@@ -21,7 +22,10 @@ run_steps() {
   # ⑤ Namespace + UID
   oc apply -f "${MANIFEST_DIR:?}/namespaces.yaml"
   for ns in fds-app monitoring-api ci-cd; do
-    echo "$ns $(oc get ns "$ns" -o jsonpath='{.metadata.uid}')" >>"$ev/05-ns-uid.txt"
+    uid=$(oc get ns "$ns" -o jsonpath='{.metadata.uid}') \
+      || { log "STOP: Namespace UID 조회 실패 ($ns)"; return 1; }
+    [[ -n "$uid" ]] || { log "STOP: Namespace UID 비어 있음 ($ns)"; return 1; }
+    printf '%s %s\n' "$ns" "$uid" >>"$ev/05-ns-uid.txt"
   done
 
   # ⑥ 자동 생성 SA·RoleBinding 기록(삭제하지 않음)
@@ -40,7 +44,10 @@ run_steps() {
 
   # ⑨ 권한 판정(--as 는 보조. 실제 세션 시험은 ⑩·⑬)
   for ns in fds-app monitoring-api ci-cd; do
-    for sa in $(oc get sa -n "$ns" -o jsonpath='{.items[*].metadata.name}'); do
+    sa_names=$(oc get sa -n "$ns" -o jsonpath='{.items[*].metadata.name}') \
+      || { log "STOP: SA 목록 조회 실패 ($ns)"; return 1; }
+    [[ -n "$sa_names" ]] || { log "STOP: SA 목록 비어 있음 ($ns)"; return 1; }
+    for sa in $sa_names; do
       oc auth can-i --list -n "$ns" --as="system:serviceaccount:$ns:$sa" \
         >"$ev/09-cani-$ns-$sa.txt"
     done

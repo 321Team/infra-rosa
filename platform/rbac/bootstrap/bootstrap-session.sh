@@ -142,6 +142,15 @@ watchdog_pid=$!
 source "$STEPS_FILE"
 declare -F run_steps >/dev/null || { log "STOP: run_steps 없음"; exit 2; }
 
+# 첫 권한 쓰기 전에 ROSA 관리면의 ID/API 대응을 읽기 전용으로 확인한다.
+if ! rosa describe cluster -c "$CLUSTER_ID" -o json >"$WORKDIR/preflight-cluster.json"; then
+  log "STOP: CLUSTER_ID 조회 실패"; exit 1
+fi
+if ! actual_api=$(jq -er '.api.url | select(type == "string" and length > 0)' "$WORKDIR/preflight-cluster.json"); then
+  log "STOP: CLUSTER_ID 의 API URL 판독 실패"; exit 1
+fi
+[[ "$actual_api" == "$API_URL" ]] || { log "STOP: CLUSTER_ID 의 API URL 불일치"; exit 1; }
+
 grant_attempted=1   # 응답 유실·부분 성공도 회수 대상으로 보기 위해 grant 호출 '전에' 표시
 log "GRANT_START user=$U cluster=$CLUSTER_ID"
 rosa grant user cluster-admin --user "$U" -c "$CLUSTER_ID"
