@@ -191,26 +191,21 @@ run_steps() {
 
   # ⑩-b 권한 목록 저장(R2) — 회수 전에 반드시. 승인 경로 외가 있으면 회수 전에 STOP.
   bash "$KIT_DIR/collect-access-inventory.sh" "$EV/10b-inventory"
-  # 분류(PR#40 보완 2 — 주체만 보고 통과시키지 않고 roleRef 까지 정확히 대조):
-  #   APPROVED        3개 ns 의 hayeoung-admin = ClusterRole/admin, 주체가 정확히 User:hayeoung
-  #                   (+ ⑮ 회차 뒤에만 존재하는 fds-app hayeoung-monitoring-edit = ClusterRole/monitoring-edit)
-  #   REVOKE_TARGET   ClusterRole/cluster-admin 이고 주체가 정확히 Group:cluster-admins(⑪에서 회수)
-  #   PLATFORM_DEFAULT 주체가 system:authenticated(:oauth) 그룹뿐이고 roleRef 가 아래 저권한 ClusterRole 목록에 있을 때만
-  #   UNEXPECTED      그 밖의 모든 경로(예: authenticated 에 붙은 cluster-admin) → 회수 전 STOP
-  # [AFTER-CREATE] ROSA 4.22 의 cluster-admins 그룹·binding 실제 이름, authenticated 대상 기본 binding 목록을 첫 실행 증적으로
-  #   확인한다. 목록에 없는 기본 binding 이 나오면 STOP → 목록 갱신은 리뷰를 거친다(자동 수용하지 않음).
-  local pd="${PLATFORM_DEFAULT_ROLES:-self-provisioner basic-user cluster-status system:basic-user system:discovery system:public-info-viewer system:openshift:public-info-viewer system:oauth-token-deleter system:scope-impersonation system:webhook system:openshift:discovery}"
-  awk -F'\t' -v pd="$pd" -v u="$U" 'BEGIN { n = split(pd, a, " "); for (i = 1; i <= n; i++) ok[a[i]] = 1 }
-    !/^#/ {
-      c = "UNEXPECTED"
-      if ($1 != "cluster" && $2 == "hayeoung-admin" && $3 == "ClusterRole" && $4 == "admin" && $5 == "User:" u) c = "APPROVED"
-      else if ($1 == "fds-app" && $2 == "hayeoung-monitoring-edit" && $3 == "ClusterRole" && $4 == "monitoring-edit" && $5 == "User:" u) c = "APPROVED"
-      else if ($1 == "cluster" && $3 == "ClusterRole" && $4 == "cluster-admin" && $5 == "Group:cluster-admins") c = "REVOKE_TARGET"
-      else if ($3 == "ClusterRole" && ($4 in ok) && $5 ~ /^Group:system:authenticated(:oauth)?(,Group:system:authenticated(:oauth)?)*$/) c = "PLATFORM_DEFAULT"
-      print c "\t" $0
-    }' "$EV/10b-inventory/access-paths-$U.tsv" >"$EV/10b-path-review.tsv"
-  if grep -q '^UNEXPECTED' "$EV/10b-path-review.tsv"; then
-    log "STOP: 승인 경로 외 권한 경로 발견 — $EV/10b-path-review.tsv 검토(회수 전)"; return 1
-  fi
+  # 분류는 classify-access-paths.sh(오프라인 공용 규칙, PR#40 리뷰 5530426592 R1): 정확한 3개 namespace,
+  # roleRef·주체 정확 일치, 플랫폼 기본 binding 은 리뷰된 policy 의 실제 규칙 sha256 까지 대조.
+  # [AFTER-CREATE] policy(../policy/platform-defaults.approved.tsv)는 첫 실행 증적을 보고 PR 리뷰로 만든다.
+  #   없으면 기본 binding 은 PENDING_POLICY → 회수는 정상으로 하고 래퍼 rc=3(정책 승인 대기)으로 끝낸다.
+  #   승인 뒤 post-revoke-check.sh 가 저장된 증적을 같은 규칙으로 오프라인 재판정한다(마스터키 재발급 불필요).
+  local crc=0
+  bash "$KIT_DIR/classify-access-paths.sh" "$EV/10b-inventory" "$U" "${POLICY_FILE:-$KIT_DIR/../policy/platform-defaults.approved.tsv}" \
+    "$EV/10b-path-review.tsv" || crc=$?
+  case "$crc" in
+    0) ;;
+    3) log "POLICY_PENDING: 기본 binding 승인 목록 없음 — 회수 후 rc=3 으로 종료($EV/10b-path-review.tsv)"
+       POLICY_PENDING=1 ;;
+    *) log "STOP: 승인 경로 외 권한 경로 또는 수집 누락 — $EV/10b-path-review.tsv 검토(회수 전)"; return 1 ;;
+  esac
   log "EVIDENCE_DIR $EV"
+  [[ "${POLICY_PENDING:-0}" == 1 ]] && return 3
+  return 0
 }

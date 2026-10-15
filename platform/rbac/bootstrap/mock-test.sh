@@ -27,6 +27,8 @@ case "$1 $2" in
       std)    echo "ID        GROUPS"; echo "gwonuk    dedicated-admins"
               [[ "${MOCK_STILL_ADMIN:-0}" == 1 ]] && echo "hayeoung  cluster-admins" ;;
       header) echo "ID        GROUPS" ;;                       # 정상 빈 목록
+      headerbroken) echo "ID        GROUPS"; echo "<html>gateway timeout</html>" ;;   # 32: 머리글 정상 + 깨진 본문(R5)
+      nogroup) echo "ID        GROUPS"; echo "hayeoung" ;;                            # 33: 그룹 열 없는 행(R5)
       empty)  : ;;                                             # 출력 없음(형식 불명)
       broken) echo "<html>gateway timeout</html>" ;;           # 깨진 출력
     esac
@@ -83,6 +85,7 @@ if [[ "$1 $2" == "auth can-i" ]]; then
 fi
 case "$*" in
   "whoami") echo "${U:-hayeoung}" ;;
+  "login "*) echo "mock-kubeconfig server=https://api.mock:443" >"$KUBECONFIG" ;;   # 실제 oc login 처럼 kubeconfig 생성(receipt 지문용)
   "whoami --show-server") echo "https://api.mock:443" ;;
   "get ns "*"jsonpath="*) [[ "${MOCK_NSUID_RC:-0}" != 0 ]] && exit "$MOCK_NSUID_RC"; echo "uid-$3" ;;
   "get sa -n "*"jsonpath="*) [[ "${MOCK_SA_RC:-0}" != 0 ]] && exit "$MOCK_SA_RC"; echo "default builder deployer" ;;
@@ -104,6 +107,8 @@ case "$*" in
       {"metadata":{"name":"self-provisioners"},"roleRef":{"kind":"ClusterRole","name":"self-provisioner"},"subjects":[{"kind":"Group","name":"system:authenticated:oauth"}]}'"$extra"']}' ;;
   "get rolebindings -n "*" -o json")
     echo '{"items":[{"metadata":{"name":"hayeoung-admin"},"roleRef":{"kind":"ClusterRole","name":"admin"},"subjects":[{"kind":"User","name":"hayeoung"}]}]}' ;;
+  "get clusterrole self-provisioner -o json")   # 32x: 승인 목록 이름이지만 규칙이 바뀐 경우(R1)
+    if [[ "${MOCK_SP_RULES:-0}" == 1 ]]; then echo '{"kind":"ClusterRole","rules":[{"apiGroups":[""],"resources":["secrets"],"verbs":["get"]}]}'; else echo '{"kind":"ClusterRole"}'; fi ;;
   "get clusterrole "*" -o json") echo '{"kind":"ClusterRole"}' ;;
 esac
 exit 0
@@ -123,6 +128,16 @@ failures=0
 
 cp "$HERE/steps.sh" "$T/template.sh"   # 실제 단계 파일(가짜 oc 는 manifest 내용을 읽지 않음)
 
+# 시험용 승인 policy: 가짜 인벤토리의 기본 binding(self-provisioners) 1행. 규칙 해시는 분류기와 같은 정규화로 계산.
+# (실제 policy 는 AFTER-CREATE 증적을 보고 PR 리뷰로 만든다 — 이 파일은 시험 전용)
+sp_sha=$(printf '{"kind":"ClusterRole"}' | jq -cS '{rules: (.rules // []), aggregationRule: (.aggregationRule // null)}' | sha256sum | cut -d' ' -f1)
+printf '# test policy\ncluster\tself-provisioners\tClusterRole\tself-provisioner\tGroup:system:authenticated:oauth\t%s\n' "$sp_sha" >"$T/policy.tsv"
+
+# 대조용 '수정 전 분류기' 키트: 3a3958e 의 규칙(이름·주체만 보고 namespace 는 cluster 가 아니면 승인)을 재현한 사본
+mkdir -p "$T/kit-nofix"; cp "$HERE"/*.sh "$T/kit-nofix/"
+perl -pi -e 's/^  elif \[\[ " \$APPROVED_NAMESPACES " == \*" \$scope "\* && /  elif [[ "\$scope" != cluster && /; s/^(  elif \[\[ "\$kind" == ClusterRole && "\$subjects" =~ \$auth_re \]\]; then)$/$1 c=PLATFORM_DEFAULT; elif false; then/' "$T/kit-nofix/classify-access-paths.sh"
+cmp -s "$HERE/classify-access-paths.sh" "$T/kit-nofix/classify-access-paths.sh" && { echo "FAIL: 대조 분류기 사본이 원본과 같음(치환 실패)"; failures=1; }
+
 # 기대값(호출 전 변수로 지정): EXP_GRANT/EXP_REVOKE(기본 1), FORBID(로그에 나오면 안 되는 정규식),
 #   REQUIRE_ERR(래퍼 stderr 에 반드시 있어야 하는 정규식), USE_SETSID=1(별도 프로세스 그룹에서 실행 — 그룹 신호 시험용)
 skipped=0
@@ -138,7 +153,7 @@ run_case() { # name steps expect_rc [env...]
   fi
   "${pre[@]}" env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" \
       CLUSTER_ID=mock-id API_URL=https://api.mock:443 DEADLINE_EPOCH="$dl" \
-      VERIFY_TRIES=2 VERIFY_INTERVAL=0 MANIFEST_DIR="$HERE/../manifests" KIT_DIR="$HERE" "$@" \
+      VERIFY_TRIES=2 VERIFY_INTERVAL=0 MANIFEST_DIR="$HERE/../manifests" KIT_DIR="$HERE" POLICY_FILE="$T/policy.tsv" "$@" \
       bash "${WRAPPER:-$HERE/bootstrap-session.sh}" "$T/$steps.sh" 2>"$T/$name.err"
   local rc=$?
   local after; after=$(grep -c '_AFTER_' "$log" || true)
@@ -208,21 +223,54 @@ run_case 30_quota_403_not_rbac_deny template 1 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
 perl -0pe 's/elif grep -q \x27\(Forbidden\)\x27 "\$errf" && grep -qF [^\n]*\n[^\n]*then echo DENY/elif grep -q \x27(Forbidden)\x27 "\$errf"; then echo DENY/' "$HERE/steps.sh" >"$T/nofix5.sh"
 cmp -s "$HERE/steps.sh" "$T/nofix5.sh" && { echo "FAIL: 30b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 run_case 30b_without_fix_passes nofix5 0 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
-# PR#40 보완 2: 로그인한 모든 사람에게 cluster-admin 이 붙은 경로는 '플랫폼 기본'이 아님 → 회수 전 STOP
-run_case 31_auth_group_admin_stops template 1 MOCK_TOKEN=1 MOCK_INV_AUTH_ADMIN=1
-# 대조(31b): roleRef 를 보지 않던 수정 전 분류는 같은 경로를 PLATFORM_DEFAULT 로 통과시킨다
-perl -pe 's/ && \(\$4 in ok\)//' "$HERE/steps.sh" >"$T/nofix2.sh"
-cmp -s "$HERE/steps.sh" "$T/nofix2.sh" && { echo "FAIL: 31b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
-run_case 31b_without_fix_passes nofix2 0 MOCK_TOKEN=1 MOCK_INV_AUTH_ADMIN=1
-# 보완 3·4: 정상 실행(25)의 증적에 대상 기록이 있고, 없을 수 있는 읽기의 rc 가 기록돼 있어야 함
-ev25=$(ls -d "$T"/home-25_steps_full_success/rosa-idp/evidence-* 2>/dev/null | head -1)
+# 리뷰 5530426592 R1: 분류는 범위·binding·roleRef·주체·실제 규칙까지 대조. 각 반례 → 회수 전 STOP, 대조(b)는 수정 전 분류로 통과
+run_case 31_auth_group_admin_stops      template 1 MOCK_TOKEN=1 MOCK_INV_AUTH_ADMIN=1              # authenticated 에 cluster-admin
+run_case 31b_without_fix_passes         template 0 MOCK_TOKEN=1 MOCK_INV_AUTH_ADMIN=1 KIT_DIR="$T/kit-nofix"
+run_case 32_sp_rules_changed_stops      template 1 MOCK_TOKEN=1 MOCK_SP_RULES=1                    # 같은 이름, 규칙에 secrets get 추가
+run_case 32b_without_fix_passes         template 0 MOCK_TOKEN=1 MOCK_SP_RULES=1 KIT_DIR="$T/kit-nofix"
+run_case 33_fourth_namespace_stops      template 1 MOCK_TOKEN=1 NAMESPACES="fds-app monitoring-api ci-cd extra-scope"
+run_case 33b_without_fix_passes         template 0 MOCK_TOKEN=1 NAMESPACES="fds-app monitoring-api ci-cd extra-scope" KIT_DIR="$T/kit-nofix"
+run_case 34_policy_pending_rc3          template 3 MOCK_TOKEN=1 POLICY_FILE="$T/no-such-policy.tsv"   # policy 미승인 → 회수 후 rc3
+run_case 35_policy_malformed_stops      template 1 MOCK_TOKEN=1 POLICY_FILE="$HERE/README.md"          # 형식 오류 policy → STOP
+# 리뷰 5530426592 R5: 머리글 정상 + 깨진/불완전 본문은 '부재'가 아님 → 회수 확인 UNKNOWN → CLEANUP_REQUIRED
+run_case 36_mgmt_header_broken_body     normal   1 MOCK_USERS_MODE=headerbroken
+run_case 37_mgmt_row_without_groups     normal   1 MOCK_USERS_MODE=nogroup
+
+# 증적 확인(보완 3·4, 리뷰 R3): 25 정상 회차 / 34 정책 대기 회차의 target·read-rc·분류·receipt
+ev_of() { ls -d "$T"/home-"$1"/rosa-idp/evidence-* 2>/dev/null | head -1; }
+ev25=$(ev_of 25_steps_full_success); ev34=$(ev_of 34_policy_pending_rc3)
 ok=PASS
 grep -qx 'CLUSTER_ID=mock-id' "$ev25/00-target.env" 2>/dev/null && grep -qx 'USER=hayeoung' "$ev25/00-target.env" || ok=FAIL
 [[ $(grep -c ' rc=' "$ev25/04-read-rc.txt" 2>/dev/null) == 2 ]] || ok=FAIL
 grep -q $'^REVOKE_TARGET\tcluster\tcluster-admins' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
 grep -q $'^PLATFORM_DEFAULT\tcluster\tself-provisioners' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
+grep -qx 'STATUS=COMPLETE' "$ev25/99-receipt.env" 2>/dev/null && grep -qx 'FINAL_RC=0' "$ev25/99-receipt.env" || ok=FAIL
+grep -qx 'STATUS=POLICY_PENDING' "$ev34/99-receipt.env" 2>/dev/null && grep -qx 'FINAL_RC=3' "$ev34/99-receipt.env" || ok=FAIL
+grep -q $'^PENDING_POLICY\tcluster\tself-provisioners' "$ev34/10b-path-review.tsv" 2>/dev/null || ok=FAIL
+for n in 28_inventory_unexpected 31_auth_group_admin_stops 36_mgmt_header_broken_body; do    # 실패 회차엔 receipt 없음
+  e=$(ev_of "$n"); [[ -n "$e" && -e "$e/99-receipt.env" ]] && ok=FAIL
+done
 [[ "$ok" == PASS ]] || failures=1
-printf '%-26s target.env·read-rc·path-review 분류 확인 => %s\n' 25x_evidence_checks "$ok"
+printf '%-26s target·read-rc·분류·receipt(정상/정책대기/실패 회차) => %s\n' 3x_evidence_checks "$ok"
+
+# 리뷰 5530426592 R4: README 의 `| tee` 실행에서 PIPESTATUS 로 래퍼 rc·로그 rc 를 따로 받는지(README 명령 그대로)
+readme_pipe() { # name steps expect_wrapper_rc expect_log_rc logpath [env...]
+  local name=$1 steps=$2 ew=$3 el=$4 lp=$5; shift 5
+  local out
+  out=$( env PATH="$T/bin:$PATH" MOCK_LOG="$T/$name.log" HOME="$T/home-$name" CLUSTER_ID=mock-id API_URL=https://api.mock:443 \
+           DEADLINE_EPOCH=$(( $(date +%s) + 600 )) VERIFY_TRIES=2 VERIFY_INTERVAL=0 "$@" \
+           bash "$HERE/bootstrap-session.sh" "$T/$steps.sh" 2>&1 | tee "$lp" >/dev/null 2>&1
+         pipeline_status=("${PIPESTATUS[@]}"); echo "${pipeline_status[0]} ${pipeline_status[1]}" )
+  local w=${out%% *} l=${out##* } ok=PASS
+  [[ $w == "$ew" && $l == "$el" ]] || ok=FAIL
+  local go=STOP; [[ $w == 0 && $l == 0 ]] && go=NEXT
+  [[ "$ok" == PASS ]] || failures=1
+  printf '%-26s wrapper_rc=%s log_rc=%s → %s => %s\n' "$name" "$w" "$l" "$go" "$ok"
+}
+readme_pipe 38_readme_pipe_normal      normal 0 0 "$T/38.log"
+readme_pipe 39_readme_pipe_step_fail   fail   1 0 "$T/39.log"
+readme_pipe 40_readme_pipe_revoke_fail normal 1 0 "$T/40.log" MOCK_REVOKE_RC=42
+readme_pipe 41_readme_pipe_log_fail    normal 0 1 "$T/no-such-dir/41.log"
 
 # 10: 로그를 파이프(tee)로 받을 때 watchdog 가 파이프를 붙잡지 않는지(마감 600초인데 즉시 끝나야 함)
 : >"$T/10.log"; start=$(date +%s)

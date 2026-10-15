@@ -16,6 +16,7 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 | `bootstrap-session.sh` | 래퍼. 대상 결속(Cluster ID↔API) → grant → `steps.sh` → **성공·실패·INT·TERM·마감 모두** revoke → 회수 확인 → 최종 rc |
 | `steps.sh` | ③~⑩-b 단계. 로그인·결속 → 상태 기록 → manifest 적용 → `--as` 판정·J-1~8 → **배포 SA 실제 token 허용/거부 시험** → 권한 목록 저장·경로 검토 |
 | `collect-access-inventory.sh` | ⑩-b 권한 목록 저장(읽기 전용) |
+| `classify-access-paths.sh` | ⑩-b 경로 분류(오프라인 공용 규칙). bootstrap 과 회수 뒤 재판정에서 같은 규칙. 승인 policy 대조, rc 0/3/1 |
 | `post-revoke-check.sh` | ⑫ 회수 뒤 D-11 판정(회수 전 세션 → 새 로그인 → 관리면·SSAR·경로 검토 → 회수 전 세션 정리) |
 | `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
 
@@ -30,17 +31,29 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
    `API_URL`은 손으로 적지 않고 **`rosa describe`가 돌려주는 표기 그대로** 씁니다. 래퍼는 이 값과 정확히 일치하는지 비교하며(포트 `:443`·끝 `/` 차이도 불일치 → STOP), 표기를 정규화하지 않습니다.
    ```bash
    cd platform/rbac/bootstrap
+   umask 077; mkdir -p ~/rosa-idp; chmod 700 ~/rosa-idp     # 로그 디렉터리는 파이프 전에 준비
    CLUSTER_ID=<id>
    API_URL=$(rosa describe cluster -c "$CLUSTER_ID" -o json | jq -er '.api.url'); echo "$API_URL"
    CLUSTER_ID="$CLUSTER_ID" API_URL="$API_URL" DEADLINE_EPOCH=$(date -d '+90 min' +%s) \
      KIT_DIR="$PWD" ./bootstrap-session.sh steps.sh 2>&1 | tee ~/rosa-idp/bootstrap.log
+   pipeline_status=("${PIPESTATUS[@]}")
+   wrapper_rc=${pipeline_status[0]}
+   log_rc=${pipeline_status[1]}
+   printf 'wrapper_rc=%s log_rc=%s\n' "$wrapper_rc" "$log_rc"
    ```
+   - `pipeline_status=…` 줄은 **파이프 바로 다음 줄**이어야 합니다(사이에 다른 명령이 있으면 값이 사라짐). `| tee`만 쓰면 화면의 rc는 tee의 값이라 래퍼 실패가 숨겨집니다(PR#40 리뷰 R4).
    - 회수(revoke)가 시작되면 **Ctrl+C는 무시됩니다**. 회수와 회수 확인(최대 `VERIFY_TRIES×VERIFY_INTERVAL`, 기본 10분)을 끝까지 하기 위해서입니다. 그래도 멈춰야 하면 두 번째 관리 세션에서 수동 revoke합니다(아래 실행 카드).
-   - rc=0이면 3으로 갑니다.
-   - rc≠0이거나 `CLEANUP_REQUIRED`가 나오면 #5에 즉시 보고합니다. IdP 삭제로 회수를 대신하지 않습니다.
+   - **`log_rc`가 0이 아니면** 로그가 온전히 저장되지 않은 것입니다. 증적이 불완전하므로 STOP하고 #5에 보고합니다.
+   - **`wrapper_rc=0` 그리고 `log_rc=0`** → 3으로 갑니다(완료, receipt `STATUS=COMPLETE`).
+   - **`wrapper_rc=3` 그리고 `log_rc=0`** → 설정·회수는 끝났고 **플랫폼 기본 binding 승인 목록만 대기 중**입니다(receipt `STATUS=POLICY_PENDING`).
+     - ⑩-b 증적의 `10b-path-review.tsv`(PENDING_POLICY 행)와 `10b-inventory/clusterrole-*.json`을 근거로 `../policy/platform-defaults.approved.tsv`를 PR로 제안하고 리뷰를 받습니다.
+     - 병합한 뒤 3으로 갑니다. 마스터키를 다시 빌릴 필요는 없습니다.
+   - 그 밖의 rc나 `CLEANUP_REQUIRED`가 나오면 #5에 즉시 보고합니다. IdP 삭제로 회수를 대신하지 않습니다.
 3. **⑫ D-11 판정** — 래퍼 로그의 `EVIDENCE_DIR` 경로를 넘깁니다.
+   - 시작 전에 래퍼 완료 receipt(`99-receipt.env`)와 대상·해시·회수 전 세션 지문을 대조하고, 저장된 ⑩-b 증적을 승인 policy로 오프라인 재판정합니다.
+   - 하나라도 다르면 판정 전에 STOP합니다(회수 전 세션 파일은 조사용으로 남김).
    ```bash
-   CLUSTER_ID=<id> API_URL=<api url> ./post-revoke-check.sh ~/rosa-idp/evidence-<시각>
+   CLUSTER_ID=<id> API_URL=<api url> ./post-revoke-check.sh ~/rosa-idp/evidence-<시각>; echo "rc=$?"
    ```
 4. **D-11d** — 권욱·재환이 **각자 본인 로그인**으로 확인해 #5에 결과를 붙입니다.
    ```bash
@@ -85,7 +98,8 @@ rosa list users -c <id>
 | 승인 Route host | `ROUTE_HOST` → A-09 | #4 Handoff 2 이후. 그 전에는 A-09 NOT_RUN 기록 |
 | UWM 활성 여부 | ④ | 읽기만. 활성화는 범위 밖 |
 | RBAC 거부 메시지 형식 | `steps.sh` `_classify`, `post-revoke-check.sh` `cls` | `User "<주체>" cannot <verb> resource "<res>"` 문장이 실제 ROSA 4.22 응답에 있는지 첫 실행 `req/*.err`로 확인. 다르면 OTHER → STOP(정상 거부로 통과시키지 않음) → 형식 갱신은 리뷰 |
-| `system:authenticated(:oauth)` 대상 기본 binding 목록 | `steps.sh` ⑩-b `PLATFORM_DEFAULT_ROLES` | 목록에 없는 기본 binding 이 있으면 UNEXPECTED → 회수 전 STOP. 목록 추가는 리뷰를 거친다(자동 수용 안 함) |
+| `system:authenticated(:oauth)` 대상 기본 binding 승인 목록 | `../policy/platform-defaults.approved.tsv` (`classify-access-paths.sh`) | 범위·binding·roleRef·주체 + ClusterRole 규칙 sha256 까지 대조. 첫 실행은 목록이 없어 래퍼 rc=3(정책 대기) → 증적으로 PR 제안·리뷰 → 병합 후 `post-revoke-check.sh`가 오프라인 재판정. 수집값을 자동 승인하지 않음 |
+| `rosa list users` 본문 행 형식·그룹 이름 | `ROSA_USERS_ROW_RE` (래퍼·post) | 머리글이 맞아도 본문 한 행이라도 형식이 다르면 UNKNOWN → 회수 확인 실패(rc1). 실제 형식으로 확정 |
 | namespace admin 의 `oc get project <ns>` 허용 | `post-revoke-check.sh` TARGET-uid | 허용 안 되면 UID 대조가 UNKNOWN → FAIL. 그때는 대조 방법을 바꿔 리뷰 |
 | D-10 (만료 token 401) | 별도 | 15분 대기가 필요해 bootstrap 창 밖에서 별도 기록 |
 

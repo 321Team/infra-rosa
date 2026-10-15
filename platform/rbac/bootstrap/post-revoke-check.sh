@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # infra-rosa#5 — 회수 뒤 D-11 판정 (첫 설정 순서 v2 §4 + v3 §2, 순서 ⑫)
 #
-# bootstrap-session.sh 가 rc=0(REVOKE_VERIFIED)으로 끝난 **직후**, 같은 WORKDIR 로 실행한다.
-# 래퍼가 rc≠0 이면 이 스크립트가 아니라 CLEANUP_REQUIRED 절차(v2 §3)로 간다.
+# bootstrap-session.sh 가 rc=0(완료) 또는 rc=3(회수 완료·기본 binding 정책 승인 대기)으로 끝난 뒤, 같은 WORKDIR 로 실행한다.
+# rc=3 이면 policy 가 PR 리뷰로 승인된 뒤에 실행한다(저장된 ⑩-b 증적을 같은 규칙으로 오프라인 재판정).
+# 래퍼가 그 밖의 rc 로 끝났으면 이 스크립트가 아니라 CLEANUP_REQUIRED 절차(v2 §3)로 간다.
+# 판정 전에 래퍼 완료 receipt(99-receipt.env)와 해시·대상·회수 전 세션 지문을 대조하고, 하나라도 다르면 STOP 한다(PR#40 리뷰 R3).
 #
 # 순서(리뷰 6163744385: 회수 전 세션 시험을 마친 뒤에 그 kubeconfig 를 정리)
 #   D-11b 회수 전 세션 그대로 → D-11a 새 로그인 → D-11c(관리면 + SSAR + ⑩-b 경로 검토) → 하영 MON 확인 → 회수 전 세션 정리
@@ -15,6 +17,9 @@ set -Eeuo pipefail
 U="${U:-hayeoung}"
 WORKDIR="${WORKDIR:-$HOME/rosa-idp}"
 ROSA_USERS_HEADER_RE="${ROSA_USERS_HEADER_RE:-^ID[[:space:]]+GROUPS[[:space:]]*$}"   # [AFTER-CREATE] 실제 머리글로 확정
+ROSA_USERS_ROW_RE="${ROSA_USERS_ROW_RE:-^[a-z0-9][a-z0-9._@-]*[[:space:]]+(cluster-admins|dedicated-admins)(,(cluster-admins|dedicated-admins))*[[:space:]]*$}"
+KIT_DIR="${KIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+POLICY_FILE="${POLICY_FILE:-$KIT_DIR/../policy/platform-defaults.approved.tsv}"
 BOOT_EV="${1:?usage: post-revoke-check.sh <bootstrap EVIDENCE_DIR>}"
 OLD="$WORKDIR/kubeconfig"          # 회수 전 세션(래퍼가 남겨 둔 것)
 NEW="$WORKDIR/kubeconfig-d11"      # D-11a 새 세션 전용
@@ -80,6 +85,42 @@ api=$(rosa describe cluster -c "$CLUSTER_ID" -o json | jq -er '.api.url') \
 [[ "$api" == "$API_URL" ]] || { log "STOP: CLUSTER_ID 의 API URL($api) ≠ API_URL"; exit 1; }
 rec TARGET "bootstrap 대상·⑩-b server·describe api.url 일치" match match -
 
+# 완료 receipt 대조(PR#40 리뷰 R3) — 회수 확인 뒤에만 발행된 receipt 가 있고, 지금 파일들이 그때와 같아야 한다.
+rcpt="$BOOT_EV/99-receipt.env"
+[[ -s "$rcpt" ]] || { log "STOP: 완료 receipt 없음($rcpt) — 회수 확인이 끝난 회차가 아님"; exit 1; }
+rv() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; f = 1 } END { exit !f }' "$rcpt"; }
+sha_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+for kv in "RECEIPT_VERSION=1" "CLUSTER_ID=$CLUSTER_ID" "API_URL=$API_URL" "USER=$U"; do
+  grep -qxF "$kv" "$rcpt" || { log "STOP: receipt 불일치(${kv%%=*})"; exit 1; }
+done
+st=$(rv STATUS || true); frc=$(rv FINAL_RC || true)
+[[ ( "$st" == COMPLETE && "$frc" == 0 ) || ( "$st" == POLICY_PENDING && "$frc" == 3 ) ]] \
+  || { log "STOP: receipt 상태 이상(STATUS=$st FINAL_RC=$frc)"; exit 1; }
+chk() { # 이름 파일 receipt-키
+  [[ -s "$2" ]] || { log "STOP: $1 파일 없음/빈 파일($2)"; exit 1; }
+  [[ "$(sha_of "$2")" == "$(rv "$3" || true)" ]] || { log "STOP: $1 해시가 receipt 와 다름(변조·다른 회차)"; exit 1; }
+}
+chk "회수 전 세션 kubeconfig" "$OLD" OLD_KUBECONFIG_SHA256
+chk "대상 기록" "$BOOT_EV/00-target.env" TARGET_SHA256
+chk "인벤토리 SHA256SUMS" "$BOOT_EV/10b-inventory/SHA256SUMS" INVENTORY_SUMS_SHA256
+chk "경로 검토" "$BOOT_EV/10b-path-review.tsv" PATH_REVIEW_SHA256
+( cd "$BOOT_EV/10b-inventory" && sha256sum -c --quiet SHA256SUMS ) >"$EV/inventory-sumcheck.txt" 2>&1 \
+  || { log "STOP: 인벤토리 파일이 SHA256SUMS 와 다름"; exit 1; }
+# 회수 전 세션이 같은 API 를 가리키는지(다른 클러스터 세션으로 D-11b 를 판정하지 않음)
+osrv=$(KUBECONFIG="$OLD" oc config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
+[[ "$osrv" == "$API_URL" ]] || { log "STOP: 회수 전 세션 server($osrv) ≠ API_URL"; exit 1; }
+rec RECEIPT "receipt·해시·회수 전 세션 server 일치" match match -
+
+# ⑩-b 저장 증적을 같은 규칙으로 오프라인 재판정(승인된 policy 필요). 0 이 아니면 판정 전에 STOP.
+crc=0
+bash "$KIT_DIR/classify-access-paths.sh" "$BOOT_EV/10b-inventory" "$U" "$POLICY_FILE" "$EV/10b-path-review.recheck.tsv" \
+  2>"$EV/10b-recheck.err" || crc=$?
+case "$crc" in
+  0) rec D-11c-paths "⑩-b 오프라인 재판정(policy $POLICY_FILE)" OK OK - ;;
+  3) log "STOP: 기본 binding policy 가 아직 승인되지 않음 — policy PR 리뷰·병합 뒤 다시 실행"; exit 1 ;;
+  *) log "STOP: ⑩-b 재판정에서 승인 외 경로 또는 입력 누락 — $EV/10b-path-review.recheck.tsv"; exit 1 ;;
+esac
+
 # D-11b — 회수 전 세션으로 비파괴 관리자 요청. 2xx 면 즉시 CLEANUP_REQUIRED.
 run D-11b "$OLD" 'DENY|UNAUTH' -- oc get nodes
 if [[ "$LAST" == ALLOW ]]; then log "CLEANUP_REQUIRED: 회수 전 세션이 아직 관리자 권한을 가짐"; exit 1; fi
@@ -109,19 +150,17 @@ cani D-11c-node "$NEW" -- list nodes
 # D-11c ① — 관리면 grant 기록. [AFTER-CREATE] 머리글 형식 확정 전에는 UNKNOWN 으로 남는다.
 rc=0; rosa list users -c "$CLUSTER_ID" >"$EV/D-11c-mgmt.out" 2>"$EV/D-11c-mgmt.err" || rc=$?
 m=UNKNOWN
-if [[ $rc -eq 0 ]] && head -n 1 "$EV/D-11c-mgmt.out" | grep -Eq "$ROSA_USERS_HEADER_RE"; then
-  if tail -n +2 "$EV/D-11c-mgmt.out" | awk -v u="$U" '$1 == u' | grep -q 'cluster-admin'; then m=PRESENT; else m=ABSENT; fi
+# 머리글 + 본문 전 행 형식이 맞을 때만 판정(R5). 깨진 본문·그룹 없는 행은 UNKNOWN.
+if [[ $rc -eq 0 ]] && head -n 1 "$EV/D-11c-mgmt.out" | grep -Eq "$ROSA_USERS_HEADER_RE" \
+   && tail -n +2 "$EV/D-11c-mgmt.out" | awk -v re="$ROSA_USERS_ROW_RE" 'NF == 0 { next } $0 !~ re { bad = 1 } END { exit bad }'; then
+  if tail -n +2 "$EV/D-11c-mgmt.out" | awk -v u="$U" '$1 == u { n = split($2, g, ","); for (i = 1; i <= n; i++) if (g[i] == "cluster-admins") f = 1 } END { exit !f }'; then
+    m=PRESENT
+  else
+    m=ABSENT
+  fi
 fi
 rec D-11c-mgmt "rosa list users" ABSENT "$m" "$rc"
-
-# D-11c ③ — ⑩-b 회수 전 구조 목록에서 UNEXPECTED 0
-pr="$BOOT_EV/10b-path-review.tsv"
-if [[ -f "$pr" ]]; then
-  n=$(grep -c '^UNEXPECTED' "$pr" || true)
-  rec D-11c-paths "10b UNEXPECTED count" 0 "$n" -
-else
-  rec D-11c-paths "10b path-review 파일" present missing -
-fi
+# D-11c ③ (⑩-b 경로)은 위 receipt 대조 직후 오프라인 재판정으로 이미 기록했다.
 
 # MON-A-09 / MON-D-13 — 하영 회수 뒤 세션(조건부 ⑮ 판단 자료. 결과만 기록, 실패로 세지 않음)
 for spec in "MON-A-09 fds-app" "MON-D-13a monitoring-api" "MON-D-13b ci-cd"; do
@@ -130,10 +169,14 @@ for spec in "MON-A-09 fds-app" "MON-D-13a monitoring-api" "MON-D-13b ci-cd"; do
   printf '%s\tservicemonitors create -n %s\t(기록)\t%s\t%s\n' "$1" "$2" "$(<"$EV/$1.out")" "$rc" >>"$EV/results.tsv"
 done
 
-# 정리 — D-11b 판정이 끝났으므로 회수 전 세션 로그아웃·파일 삭제(다른 kubeconfig 는 건드리지 않음)
-KUBECONFIG="$OLD" oc logout >/dev/null 2>&1 || true
-rm -f -- "$OLD"
-log "OLD_SESSION_CLEANED"
+# 정리 — 모든 판정이 PASS 일 때만 회수 전 세션 로그아웃·파일 삭제(R3). FAIL 이면 조사용으로 남기고 CLEANUP_REQUIRED 판단.
+if [[ $fail -eq 0 ]]; then
+  KUBECONFIG="$OLD" oc logout >/dev/null 2>&1 || true
+  rm -f -- "$OLD"
+  log "OLD_SESSION_CLEANED"
+else
+  log "OLD_SESSION_KEPT(판정 FAIL — 조사 후 수동 정리): $OLD"
+fi
 
 ( cd "$EV" && sha256sum -- * >SHA256SUMS )
 column -t -s $'\t' "$EV/results.tsv" >&2 || cat "$EV/results.tsv" >&2

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # post-revoke-check.sh MOCK 시험 — 가짜 rosa/oc(클라우드 호출 없음, jq 필요). 하나라도 FAIL 이면 rc1.
+# fixture 는 bootstrap 회차 증적과 같은 형식(00-target.env, 05-ns-uid.txt, 10b-inventory/*, 10b-path-review.tsv,
+# 99-receipt.env)을 만들고, 리뷰 5530426592 R3 의 변조·다른 회차·다른 세션 경우를 하나씩 주입한다.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
@@ -10,21 +12,20 @@ cat >"$T/bin/oc" <<'EOF'
 # KUBECONFIG 로 세션 구분: .../kubeconfig = 회수 전(OLD), .../kubeconfig-d11 = 새 로그인(NEW)
 mode=OLD; [[ "${KUBECONFIG:-}" == *kubeconfig-d11 ]] && mode=NEW
 echo "oc[$mode] $*" >>"$MOCK_LOG"
-# 실제 RBAC 거부 형식
 deny()   { echo 'Error from server (Forbidden): nodes is forbidden: User "hayeoung" cannot list resource "nodes" in API group "" at the cluster scope' >&2; exit 1; }
-# RBAC 이 아닌 403(admission webhook) — 정상 거부로 보면 안 됨(보완 5)
 hook()   { echo 'Error from server (Forbidden): admission webhook "mock.example" denied the request' >&2; exit 1; }
 unauth() { echo "error: You must be logged in to the server (Unauthorized)" >&2; exit 1; }
 a="$*"
 if [[ $mode == OLD ]]; then
   case "$a" in
+    "config view --minify -o jsonpath={.clusters[0].cluster.server}") echo "${MOCK_OLD_SERVER:-https://api.mock:443}" ;;
     "get nodes") case "${MOCK_OLD:-deny}" in allow) exit 0 ;; unauth) unauth ;; hook) hook ;; *) deny ;; esac ;;
     "logout") exit 0 ;;
   esac
   exit 0
 fi
 case "$a" in
-  "login "*) : >"$KUBECONFIG"; exit 0 ;;                         # 실제 oc login 처럼 새 kubeconfig 파일 생성
+  "login "*) : >"$KUBECONFIG"; exit 0 ;;
   "logout") exit 0 ;;
   "whoami") echo hayeoung ;;
   "whoami --show-server") echo https://api.mock:443 ;;
@@ -44,57 +45,106 @@ echo "rosa $*" >>"$MOCK_LOG"
 if [[ "$1 $2" == "describe cluster" ]]; then echo "{\"api\":{\"url\":\"${MOCK_DESCRIBE_API:-https://api.mock:443}\"}}"; exit 0; fi
 [[ "$1 $2" == "list users" ]] || exit 0
 case "${MOCK_USERS_MODE:-header}" in
-  header) echo "ID        GROUPS" ;;
-  admin)  echo "ID        GROUPS"; echo "hayeoung  cluster-admins" ;;
-  broken) echo "<html>bad</html>" ;;
+  header)       echo "ID        GROUPS" ;;
+  admin)        echo "ID        GROUPS"; echo "hayeoung  cluster-admins" ;;
+  broken)       echo "<html>bad</html>" ;;
+  headerbroken) echo "ID        GROUPS"; echo "<html>gateway timeout</html>" ;;
 esac
 EOF
 chmod +x "$T/bin/oc" "$T/bin/rosa"
 
+# 승인 policy(시험 전용): self-provisioners 1행, 규칙 해시는 분류기와 같은 정규화
+norm() { jq -cS '{rules: (.rules // []), aggregationRule: (.aggregationRule // null)}' | sha256sum | cut -d' ' -f1; }
+printf '# test policy\ncluster\tself-provisioners\tClusterRole\tself-provisioner\tGroup:system:authenticated:oauth\t%s\n' \
+  "$(printf '{"kind":"ClusterRole"}' | norm)" >"$T/policy.tsv"
+
+sha() { sha256sum -- "$1" | cut -d' ' -f1; }
+# bootstrap 회차 증적 fixture + receipt
+mk_fixture() { # home
+  local home=$1 ev="$1/rosa-idp/ev" inv="$1/rosa-idp/ev/10b-inventory"
+  mkdir -p "$inv"
+  echo "mock-kubeconfig server=https://api.mock:443" >"$home/rosa-idp/kubeconfig"   # 회수 전 세션
+  printf 'CLUSTER_ID=%s\nAPI_URL=https://api.mock:443\nUSER=hayeoung\nSTARTED_AT=x\n' "${BOOT_CLUSTER:-mock-id}" >"$ev/00-target.env"
+  printf 'fds-app uid-fds-app\nmonitoring-api uid-monitoring-api\nci-cd uid-ci-cd\n' >"$ev/05-ns-uid.txt"
+  echo "${BOOT_SERVER:-https://api.mock:443}" >"$inv/server.txt"
+  {
+    printf '# access paths for hayeoung\n# scope\tbinding\troleRef.kind\troleRef.name\tsubjects\n'
+    if [[ "${FIX_EMPTY_PATHS:-0}" != 1 ]]; then
+      printf 'cluster\tcluster-admins\tClusterRole\tcluster-admin\tGroup:cluster-admins\n'
+      printf 'cluster\tself-provisioners\tClusterRole\tself-provisioner\tGroup:system:authenticated:oauth\n'
+      for ns in fds-app monitoring-api ci-cd; do printf '%s\thayeoung-admin\tClusterRole\tadmin\tUser:hayeoung\n' "$ns"; done
+      [[ "${FIX_HIDDEN:-0}" == 1 ]] && printf 'cluster\thidden-direct\tClusterRole\tsudoer\tUser:hayeoung\n'
+    fi
+  } >"$inv/access-paths-hayeoung.tsv"
+  for r in cluster-admin self-provisioner admin sudoer; do echo '{"kind":"ClusterRole"}' >"$inv/clusterrole-$r.json"; done
+  ( cd "$inv" && sha256sum -- *.json *.txt *.tsv >SHA256SUMS )
+  printf 'APPROVED\tfds-app\thayeoung-admin\n' >"$ev/10b-path-review.tsv"
+  {
+    printf 'RECEIPT_VERSION=1\nSTATUS=%s\nFINAL_RC=%s\n' "${RC_STATUS:-COMPLETE}" "${RC_FINAL:-0}"
+    printf 'CLUSTER_ID=mock-id\nAPI_URL=https://api.mock:443\nUSER=hayeoung\nREVOKE_VERIFIED_AT=x\n'
+    printf 'OLD_KUBECONFIG_SHA256=%s\n' "$(sha "$home/rosa-idp/kubeconfig")"
+    printf 'TARGET_SHA256=%s\n' "$(sha "$ev/00-target.env")"
+    printf 'INVENTORY_SUMS_SHA256=%s\n' "$(sha "$inv/SHA256SUMS")"
+    printf 'PATH_REVIEW_SHA256=%s\n' "$(sha "$ev/10b-path-review.tsv")"
+  } >"$ev/99-receipt.env"
+  # receipt 발행 뒤 변조·누락 주입
+  [[ "${NO_RECEIPT:-0}" == 1 ]] && rm -f "$ev/99-receipt.env"
+  [[ "${TAMPER_REVIEW:-0}" == 1 ]] && printf 'APPROVED\tci-cd\thayeoung-admin\n' >>"$ev/10b-path-review.tsv"
+  [[ "${TAMPER_INV:-0}" == 1 ]] && echo '{"kind":"ClusterRole","rules":[{"verbs":["*"]}]}' >"$inv/clusterrole-self-provisioner.json"
+  [[ "${SWAP_OLD:-0}" == 1 ]] && echo "other-session" >"$home/rosa-idp/kubeconfig"
+  [[ "${NO_OLD:-0}" == 1 ]] && rm -f "$home/rosa-idp/kubeconfig"
+  return 0
+}
+
 fail=0
-case_() { # name expect_rc [env...]
+case_() { # name expect_rc [env...]   — 환경변수 주입은 fixture 와 실행 양쪽에 같이 적용
   local name=$1 expect=$2; shift 2
   local home="$T/h-$name" log="$T/$name.log"; : >"$log"
-  local ev="$home/rosa-idp/ev"
-  mkdir -p "$ev/10b-inventory"
-  : >"$home/rosa-idp/kubeconfig"                               # 래퍼가 남겨 둔 회수 전 세션
-  [[ "${NO_OLD:-0}" == 1 ]] && rm -f "$home/rosa-idp/kubeconfig"
-  # bootstrap 회차 증적(steps.sh 가 남기는 것과 같은 형식)
-  printf 'CLUSTER_ID=%s\nAPI_URL=https://api.mock:443\nUSER=hayeoung\nSTARTED_AT=x\n' "${BOOT_CLUSTER:-mock-id}" >"$ev/00-target.env"
-  echo "${BOOT_SERVER:-https://api.mock:443}" >"$ev/10b-inventory/server.txt"
-  printf 'fds-app uid-fds-app\nmonitoring-api uid-monitoring-api\nci-cd uid-ci-cd\n' >"$ev/05-ns-uid.txt"
-  printf 'APPROVED\tfds-app\thayeoung-admin\n' >"$ev/10b-path-review.tsv"
-  [[ "${UNEXPECTED_PATH:-0}" == 1 ]] && printf 'UNEXPECTED\tcluster\thidden\n' >>"$ev/10b-path-review.tsv"
-  env PATH="$T/bin:$PATH" HOME="$home" MOCK_LOG="$log" CLUSTER_ID=mock-id API_URL=https://api.mock:443 "$@" \
-    bash "$HERE/post-revoke-check.sh" "$ev" >/dev/null 2>"$T/$name.err"
+  ( export "$@" 2>/dev/null; mk_fixture "$home" )
+  env PATH="$T/bin:$PATH" HOME="$home" MOCK_LOG="$log" CLUSTER_ID=mock-id API_URL=https://api.mock:443 \
+      POLICY_FILE="$T/policy.tsv" KIT_DIR="$HERE" "$@" \
+    bash "$HERE/post-revoke-check.sh" "$home/rosa-idp/ev" >/dev/null 2>"$T/$name.err"
   local rc=$? old_left=no new_left=no
   [[ -f "$home/rosa-idp/kubeconfig" ]] && old_left=yes
   [[ -e "$home/rosa-idp/kubeconfig-d11" ]] && new_left=yes
-  # 보완 1: 새 세션 kubeconfig 는 어떤 결과든 남으면 안 됨. 회수 전 세션은 정상(rc0)이면 지워져야 함
+  # 새 세션 kubeconfig 는 어떤 결과든 남으면 안 됨. 회수 전 세션은 PASS(rc0)면 지워지고, FAIL 이면 조사용으로 남는다.
   local ok=PASS
   [[ $rc == "$expect" && $new_left == no ]] || ok=FAIL
-  [[ $rc != 0 || $old_left == no ]] || ok=FAIL
+  if [[ $rc == 0 ]]; then [[ $old_left == no ]] || ok=FAIL; fi
   [[ "$ok" == PASS ]] || fail=1
-  printf '%-26s rc=%-2s expect=%-2s old_kubeconfig_left=%-3s new_kubeconfig_left=%-3s => %s\n' \
+  printf '%-30s rc=%-2s expect=%-2s old_kubeconfig_left=%-3s new_kubeconfig_left=%-3s => %s\n' \
     "$name" "$rc" "$expect" "$old_left" "$new_left" "$ok"
 }
 
 echo "bash $BASH_VERSION / $(uname -s) / jq $(jq --version 2>/dev/null || echo MISSING)"
-case_ P1_normal              0
-case_ P2_old_session_admin   1 MOCK_OLD=allow          # 회수 전 세션이 여전히 관리자 → CLEANUP_REQUIRED
-case_ P3_old_session_401     0 MOCK_OLD=unauth         # 회수 전 세션 401 은 허용(D-11a·c 와 결합)
-case_ P4_new_nodes_401       1 MOCK_NEW_NODES=unauth   # 새 세션 401 은 D-11a PASS 아님
-case_ P5_new_star_yes        1 MOCK_NEW_STAR=yes       # SSAR '*' '*' yes
-case_ P6_mgmt_still_admin    1 MOCK_USERS_MODE=admin
-case_ P7_mgmt_format_unknown 1 MOCK_USERS_MODE=broken
-UNEXPECTED_PATH=1 case_ P8_unexpected_path 1
-NO_OLD=1 case_ P9_no_old_kubeconfig 1
-# PR#40 보완 3: 대상 불일치
-BOOT_CLUSTER=other-id case_ P10_boot_cluster_mismatch 1                   # 다른 회차(클러스터)의 증적 폴더
-BOOT_SERVER=https://api.other:443 case_ P11_inventory_server_mismatch 1  # ⑩-b 수집 server 가 다름
-case_ P12_describe_api_mismatch 1 MOCK_DESCRIBE_API=https://api.other:443 # CLUSTER_ID 의 실제 API 가 다름
-case_ P13_ns_uid_mismatch 1 MOCK_UID_MISMATCH=1                           # 같은 이름의 다른 namespace
-# PR#40 보완 5: RBAC 이 아닌 403 을 정상 거부로 보지 않음
-case_ P14_old_session_webhook_403 1 MOCK_OLD=hook
-case_ P15_new_nodes_webhook_403   1 MOCK_NEW_NODES=hook
+case_ P1_normal                     0
+case_ P2_old_session_admin          1 MOCK_OLD=allow           # 회수 전 세션이 여전히 관리자 → CLEANUP_REQUIRED
+case_ P3_old_session_401            0 MOCK_OLD=unauth          # 회수 전 세션 401 은 허용(D-11a·c 와 결합)
+case_ P4_new_nodes_401              1 MOCK_NEW_NODES=unauth    # 새 세션 401 은 D-11a PASS 아님
+case_ P5_new_star_yes               1 MOCK_NEW_STAR=yes        # SSAR '*' '*' yes
+case_ P6_mgmt_still_admin           1 MOCK_USERS_MODE=admin
+case_ P7_mgmt_format_unknown        1 MOCK_USERS_MODE=broken
+case_ P8_hidden_path_recheck        1 FIX_HIDDEN=1             # 저장 인벤토리에 숨은 직접 binding → 오프라인 재판정 STOP
+case_ P9_no_old_kubeconfig          1 NO_OLD=1
+# 대상 불일치(보완 3)
+case_ P10_boot_cluster_mismatch     1 BOOT_CLUSTER=other-id
+case_ P11_inventory_server_mismatch 1 BOOT_SERVER=https://api.other:443
+case_ P12_describe_api_mismatch     1 MOCK_DESCRIBE_API=https://api.other:443
+case_ P13_ns_uid_mismatch           1 MOCK_UID_MISMATCH=1
+# RBAC 이 아닌 403(보완 5)
+case_ P14_old_session_webhook_403   1 MOCK_OLD=hook
+case_ P15_new_nodes_webhook_403     1 MOCK_NEW_NODES=hook
+# 리뷰 5530426592 R5: 머리글 정상 + 깨진 본문
+case_ P16_mgmt_header_broken_body   1 MOCK_USERS_MODE=headerbroken
+# 리뷰 5530426592 R3: 완료 receipt·해시·회수 전 세션 결속
+case_ P17_no_receipt                1 NO_RECEIPT=1
+case_ P18_path_review_tampered      1 TAMPER_REVIEW=1
+case_ P19_inventory_tampered        1 TAMPER_INV=1
+case_ P20_old_session_swapped       1 SWAP_OLD=1
+case_ P21_old_session_other_server  1 MOCK_OLD_SERVER=https://api.other:443
+case_ P22_failed_bootstrap_receipt  1 RC_STATUS=FAILED RC_FINAL=1
+case_ P23_empty_paths               1 FIX_EMPTY_PATHS=1
+# 정책 승인 대기 회차(rc3): policy 가 없으면 STOP, 승인된 policy 가 있으면 오프라인 재판정으로 PASS
+case_ P24_pending_without_policy    1 RC_STATUS=POLICY_PENDING RC_FINAL=3 POLICY_FILE="$T/no-such-policy.tsv"
+case_ P25_pending_with_policy       0 RC_STATUS=POLICY_PENDING RC_FINAL=3
 exit "$fail"
