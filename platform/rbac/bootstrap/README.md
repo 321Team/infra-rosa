@@ -26,12 +26,16 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
    rosa list idps -c fds-rosa-hcp
    rosa create idp -c fds-rosa-hcp --type htpasswd --name fds-htpasswd --from-file ~/rosa-idp/htpasswd
    ```
-2. **②~⑪ 래퍼 한 번 실행** — 마감시각을 정하고, 두 번째 관리 세션(회수용)을 미리 열어 둡니다.
+2. **②~⑪ 래퍼 한 번 실행** — 아래 "실행 카드"를 먼저 채우고, 두 번째 관리 세션(회수용)을 미리 열어 둡니다.
+   `API_URL`은 손으로 적지 않고 **`rosa describe`가 돌려주는 표기 그대로** 씁니다. 래퍼는 이 값과 정확히 일치하는지 비교하며(포트 `:443`·끝 `/` 차이도 불일치 → STOP), 표기를 정규화하지 않습니다.
    ```bash
    cd platform/rbac/bootstrap
-   CLUSTER_ID=<id> API_URL=<api url> DEADLINE_EPOCH=$(date -d '+90 min' +%s) \
+   CLUSTER_ID=<id>
+   API_URL=$(rosa describe cluster -c "$CLUSTER_ID" -o json | jq -er '.api.url'); echo "$API_URL"
+   CLUSTER_ID="$CLUSTER_ID" API_URL="$API_URL" DEADLINE_EPOCH=$(date -d '+90 min' +%s) \
      KIT_DIR="$PWD" ./bootstrap-session.sh steps.sh 2>&1 | tee ~/rosa-idp/bootstrap.log
    ```
+   - 회수(revoke)가 시작되면 **Ctrl+C는 무시됩니다**. 회수와 회수 확인(최대 `VERIFY_TRIES×VERIFY_INTERVAL`, 기본 10분)을 끝까지 하기 위해서입니다. 그래도 멈춰야 하면 두 번째 관리 세션에서 수동 revoke합니다(아래 실행 카드).
    - rc=0이면 3으로 갑니다.
    - rc≠0이거나 `CLEANUP_REQUIRED`가 나오면 #5에 즉시 보고합니다. IdP 삭제로 회수를 대신하지 않습니다.
 3. **⑫ D-11 판정** — 래퍼 로그의 `EVIDENCE_DIR` 경로를 넘깁니다.
@@ -48,11 +52,29 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
    ```
 5. 증적을 `fds-project-evidence` `evidence/P2-ROSA-01/`로 PR 편입(독립 리뷰)하고, #4 Handoff 4·5에 제공합니다.
 
+## 실행 카드 — 작업창 확정 때 채워서 #5에 먼저 올림 (PR#37 이권욱 리뷰)
+
+| 항목 | 값 |
+|---|---|
+| Cluster ID / `API_URL`(describe 표기 그대로) | |
+| 작업창(KST 시작–끝) / `DEADLINE_EPOCH` | |
+| 회수 담당 / 두 번째 관리 세션 위치 | 이하영 / (예: CloudShell 두 번째 탭, `rosa whoami` 확인 완료) |
+| **명령 대기 상한** | 한 명령이 **5분(제안값 — 작업창 확정 때 조정)** 넘게 응답이 없으면(예: `oc login` 비밀번호 대기, 네트워크 정지) 기다리지 않고 두 번째 세션에서 수동 revoke. 래퍼의 마감 watchdog은 foreground 명령이 끝나야 처리되므로 이 상한을 대신하지 못함 |
+| 수동 revoke 인계 | 아래 명령 → `rosa list users -c <id>`로 grant 없음 확인 → #5에 `CLEANUP_REQUIRED` 경위·시각 기록 |
+| 수동 revoke가 필요한 경우 | ① 명령 대기 상한 초과 ② 회수 중 Ctrl+C로도 멈추지 않아 강제 종료(kill -9)한 경우 ③ CloudShell 세션 유실 ④ 래퍼가 `CLEANUP_REQUIRED`로 끝남 |
+
+```bash
+# 두 번째 관리 세션 — 수동 회수
+rosa revoke user cluster-admin --user hayeoung -c <id> -y
+rosa list users -c <id>
+```
+
 ## 생성 후 확인 `[AFTER-CREATE]` — 실제 클러스터가 있어야 알 수 있는 것 (가정하지 않음)
 
 | 항목 | 위치 | 확인 방법 / 다르면 |
 |---|---|---|
 | `rosa list users` 머리글 | `ROSA_USERS_HEADER_RE` (래퍼·post) | 생성 후 `rosa list users -c <id>` 실제 출력. 다르면 정규식을 고치고 다시 리뷰받기 전에는 실행하지 않음(그 전에는 UNKNOWN → rc1) |
+| `rosa describe` 의 `api.url` 실제 표기 | 래퍼 F1 결속·`steps.sh` ③ server 비교 | 생성 후 표기(포트·끝 `/`)를 #5에 기록하고 `API_URL`을 그 값 그대로 사용. `oc whoami --show-server` 표기와 다르면 ③에서 STOP → 기록 후 재검토 |
 | `rosa revoke user ... -y` 옵션 | 래퍼 cleanup | `rosa revoke user --help` |
 | htpasswd IdP 개수 제한·`--from-file` | ① | 기존 htpasswd IdP가 있으면 STOP |
 | grant/revoke 반영 지연 | 래퍼 `VERIFY_TRIES`·`VERIFY_INTERVAL` | 기본 60초 × 10회. 넘으면 CLEANUP_REQUIRED |

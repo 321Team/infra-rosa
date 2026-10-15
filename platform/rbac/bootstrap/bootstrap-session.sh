@@ -89,9 +89,12 @@ verify_revoked() {
 
 cleanup() {
   local rc=$?
-  trap - EXIT INT TERM ERR
+  trap - EXIT ERR
+  # 회수 중 Ctrl+C·TERM 은 무시한다(PR#37 이재환 리뷰 #1). 무시 상태는 자식(rosa/oc)에게도 상속되어
+  # revoke·회수 확인이 끝까지 간다. 강제 종료(kill -9)·세션 유실은 막을 수 없으므로 두 번째 관리 세션에서 수동 revoke.
+  trap '' INT TERM
   [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null || true
-  log "CLEANUP_START rc=$rc grant_attempted=$grant_attempted"
+  log "CLEANUP_START rc=$rc grant_attempted=$grant_attempted (회수 중 Ctrl+C 무시 — 멈춰야 하면 두 번째 관리 세션에서 수동 revoke)"
   if [[ "$grant_attempted" == 1 ]]; then
     if rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y; then
       log "REVOKE_CMD_OK"

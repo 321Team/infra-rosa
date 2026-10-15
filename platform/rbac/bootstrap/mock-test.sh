@@ -18,7 +18,10 @@ case "$1 $2" in
     esac
     exit "${MOCK_DESCRIBE_RC:-0}" ;;
   "grant user")  exit 0 ;;
-  "revoke user") exit "${MOCK_REVOKE_RC:-0}" ;;
+  "revoke user")
+    # 29: 실제 Ctrl+C 처럼 자기 프로세스 그룹 전체(래퍼+rosa)에 INT. 회수 중 무시가 상속되면 rosa 도 끝까지 간다.
+    if [[ "${MOCK_INT_DURING_REVOKE:-0}" == 1 ]]; then kill -INT 0; sleep 0.3; echo "MOCK: revoke survived INT" >>"$MOCK_LOG"; fi
+    exit "${MOCK_REVOKE_RC:-0}" ;;
   "list users")
     case "${MOCK_USERS_MODE:-std}" in
       std)    echo "ID        GROUPS"; echo "gwonuk    dedicated-admins"
@@ -111,16 +114,23 @@ failures=0
 
 cp "$HERE/steps.sh" "$T/template.sh"   # 실제 단계 파일(가짜 oc 는 manifest 내용을 읽지 않음)
 
-# 기대값(호출 전 변수로 지정): EXP_GRANT/EXP_REVOKE(기본 1), FORBID(로그에 나오면 안 되는 정규식)
+# 기대값(호출 전 변수로 지정): EXP_GRANT/EXP_REVOKE(기본 1), FORBID(로그에 나오면 안 되는 정규식),
+#   REQUIRE_ERR(래퍼 stderr 에 반드시 있어야 하는 정규식), USE_SETSID=1(별도 프로세스 그룹에서 실행 — 그룹 신호 시험용)
+skipped=0
 run_case() { # name steps expect_rc [env...]
   local name=$1 steps=$2 expect=$3; shift 3
   local log="$T/$name.log"; : >"$log"
   local dl=$(( $(date +%s) + 600 ))
   [[ "$steps" == deadline ]] && dl=$(( $(date +%s) + 2 ))
-  env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" \
+  local pre=()
+  if [[ "${USE_SETSID:-0}" == 1 ]]; then
+    if setsid --help 2>&1 | grep -q -- '--wait'; then pre=(setsid --wait)
+    else printf '%-26s => SKIP (setsid --wait 없음 — Linux 에서 실행 필요)\n' "$name"; skipped=1; return; fi
+  fi
+  "${pre[@]}" env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" \
       CLUSTER_ID=mock-id API_URL=https://api.mock:443 DEADLINE_EPOCH="$dl" \
       VERIFY_TRIES=2 VERIFY_INTERVAL=0 MANIFEST_DIR="$HERE/../manifests" KIT_DIR="$HERE" "$@" \
-      bash "$HERE/bootstrap-session.sh" "$T/$steps.sh" 2>"$T/$name.err"
+      bash "${WRAPPER:-$HERE/bootstrap-session.sh}" "$T/$steps.sh" 2>"$T/$name.err"
   local rc=$?
   local after; after=$(grep -c '_AFTER_' "$log" || true)
   local granted; granted=$(grep -c '^rosa grant' "$log" || true)
@@ -128,8 +138,12 @@ run_case() { # name steps expect_rc [env...]
   local forbid=0; [[ -n "${FORBID:-}" ]] && forbid=$(grep -Ec "$FORBID" "$log" || true)
   local cr; cr=$(grep -c 'CLEANUP_REQUIRED' "$T/$name.err" || true)
   local perm; perm=$(stat -c '%a' "$T/home-$name/rosa-idp" 2>/dev/null || echo NA)
+  local req=1; [[ -n "${REQUIRE_ERR:-}" ]] && req=$(grep -Ec "$REQUIRE_ERR" "$T/$name.err" || true)
+  local fe=0; [[ -n "${FORBID_ERR:-}" ]] && fe=$(grep -Ec "$FORBID_ERR" "$T/$name.err" || true)
+  local rcok=0   # expect 가 nonzero 면 0 이 아닌 모든 rc 를 인정(신호 종료 rc 는 환경마다 다를 수 있음)
+  if [[ "$expect" == nonzero ]]; then [[ $rc != 0 ]] && rcok=1; else [[ $rc == "$expect" ]] && rcok=1; fi
   local ok=PASS
-  [[ $rc == "$expect" && $after == 0 && $granted == "${EXP_GRANT:-1}" && $revoked == "${EXP_REVOKE:-1}" && $forbid == 0 ]] || ok=FAIL
+  [[ $rcok == 1 && $after == 0 && $granted == "${EXP_GRANT:-1}" && $revoked == "${EXP_REVOKE:-1}" && $forbid == 0 && $req -ge 1 && $fe == 0 ]] || ok=FAIL
   [[ "$ok" == PASS ]] || failures=1
   printf '%-26s rc=%-3s expect=%-3s after=%s grant=%s revoke=%s forbidden=%s CLEANUP_REQUIRED=%s dir_perm=%s => %s\n' \
     "$name" "$rc" "$expect" "$after" "$granted" "$revoked" "$forbid" "$cr" "$perm" "$ok"
@@ -170,6 +184,11 @@ FORBID='^oc get groups -o json' run_case 26_sa_secret_leak_stops template 1 MOCK
 FORBID='^oc --kubeconfig=' run_case 27_token_life_3600_stops template 1 MOCK_TOKEN=1 MOCK_TOKEN_LIFE=3600 # claim 900초 초과 → SA 요청 0회
 run_case 28_inventory_unexpected template 1 MOCK_TOKEN=1 MOCK_INV_UNEXPECTED=1                          # 숨은 직접 binding → 회수 전 STOP
 unset FORBID
+# PR#37 리뷰(이재환 #1): 회수(revoke) 도중 Ctrl+C(프로세스 그룹 INT)가 와도 회수·확인을 끝까지 하고 기록을 남긴다
+USE_SETSID=1 REQUIRE_ERR='REVOKE_VERIFIED' run_case 29_ctrl_c_during_revoke normal 0 MOCK_INT_DURING_REVOKE=1
+# 대조(29b): 회수 중 무시(trap '' INT TERM)를 뺀 사본은 같은 상황에서 INT 로 죽어야 한다 — 29 가 의미 있는 시험인지 확인
+grep -v "^  trap '' INT TERM$" "$HERE/bootstrap-session.sh" >"$T/wrapper-nofix.sh"
+WRAPPER="$T/wrapper-nofix.sh" USE_SETSID=1 FORBID_ERR='REVOKE_VERIFIED' run_case 29b_without_fix_dies normal nonzero MOCK_INT_DURING_REVOKE=1
 
 # 10: 로그를 파이프(tee)로 받을 때 watchdog 가 파이프를 붙잡지 않는지(마감 600초인데 즉시 끝나야 함)
 : >"$T/10.log"; start=$(date +%s)
@@ -180,4 +199,5 @@ rc=${PIPESTATUS[0]}; el=$(( $(date +%s) - start ))
 ok=PASS
 [[ $rc == 0 && $el -lt 20 ]] || { ok=FAIL; failures=1; }
 printf '%-22s rc=%-3s elapsed=%ss (deadline 600s) => %s\n' 10_pipe_no_hang "$rc" "$el" "$ok"
+[[ $skipped == 1 ]] && echo "NOTE: SKIP 있음 — Linux(setsid --wait)에서 다시 실행해야 전체 판정 가능"
 exit "$failures"
