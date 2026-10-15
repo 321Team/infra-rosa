@@ -34,6 +34,11 @@ EOF
 cat >"$T/bin/oc" <<'EOF'
 #!/usr/bin/env bash
 echo "oc $*" >>"$MOCK_LOG"
+# ⑨ `oc auth can-i --list` 는 실제로 권한 표를 출력하고 rc0 (SSAR yes/no 질의와 다름)
+if [[ "$1 $2 $3" == "auth can-i --list" ]]; then
+  echo "Resources   Non-Resource URLs   Resource Names   Verbs"
+  exit 0
+fi
 if [[ "$1 $2" == "auth can-i" ]]; then
   rc="${MOCK_CANI_RC:-1}"
   case "$rc" in 0) echo yes ;; 1) echo no ;; esac
