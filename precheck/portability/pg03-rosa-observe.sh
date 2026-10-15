@@ -19,9 +19,11 @@
 # 종료 코드:
 #   0  두 앱 모두 restricted-v2·배정 UID·portable SecurityContext·digest 일치·Ready
 #   2  입력 오류(oc 호출 전)          10 대상 불일치(서버/Cluster ID/NS UID)
-#   11 수집·파싱 오류(조회 rc≠0, 형식 이상, 대상 Deployment·현재 ReplicaSet 누락)
+#   11 수집·파싱 오류 또는 판정 불가(조회 rc≠0, 형식 이상, Deployment·현재 ReplicaSet 누락,
+#      pod-template-hash 불일치, 앱 컨테이너 없음·중복, paused 또는 observedGeneration < generation)
 #   31 SCC가 restricted-v2가 아니거나 UID가 고정값·범위 밖·미배정
-#   32 SecurityContext가 portable 계약과 다름(UID/GID 고정, 읽기 전용 루트 아님 등)
+#   32 SecurityContext가 portable 계약과 다름(유효값 기준, template·live Pod 모두: UID/GID 고정,
+#      runAsNonRoot·seccomp·읽기 전용 루트·권한 상승·drop ALL 위반)
 #   33 이미지 참조 또는 imageID digest가 승인값과 다름(멀티아키텍처 index/child 차이 포함 — 사람 확인)
 #   30 rollout 미완료 또는 Ready 아님(transaction-api는 DB 경로가 필요)
 #   여러 문제가 겹치면 11 > 31 > 32 > 33 > 30 순서로 하나를 고르고, 행별 결과는 모두 기록한다.
@@ -139,30 +141,43 @@ def uid_range(nsdoc):
         raise ValueError(f'namespace uid-range annotation invalid: {raw!r}')
     return int(start), int(size)
 
-def template_findings(dep):
+def sec_findings(where, pod_spec, live):
+    """보안 설정을 유효값(컨테이너 값이 있으면 그것, 없으면 Pod 값)으로 본다(보완 4).
+    init·일반 컨테이너 모두 본다. live Pod에서는 SCC가 넣은 runAsUser를 허용하고 UID 판정(31)에서 따로 본다."""
     f = []
-    spec = dep['spec']['template']['spec']
-    psc = spec.get('securityContext') or {}
-    if 'runAsUser' in psc or 'runAsGroup' in psc:
-        f.append('template pod runAsUser/runAsGroup fixed')
-    if psc.get('runAsNonRoot') is not True:
-        f.append('template runAsNonRoot not true')
-    if (psc.get('seccompProfile') or {}).get('type') != 'RuntimeDefault':
-        f.append('template seccomp not RuntimeDefault')
-    for c in spec.get('containers') or []:
-        sc = c.get('securityContext') or {}
-        n = c.get('name')
-        if 'runAsUser' in sc or 'runAsGroup' in sc:
-            f.append(f'template container {n} runAsUser/runAsGroup fixed')
-        if sc.get('readOnlyRootFilesystem') is not True:
-            f.append(f'template container {n} readOnlyRootFilesystem not true')
-        if sc.get('allowPrivilegeEscalation') is not False:
-            f.append(f'template container {n} allowPrivilegeEscalation not false')
-        if sc.get('privileged') is True:
-            f.append(f'template container {n} privileged')
-        if 'ALL' not in ((sc.get('capabilities') or {}).get('drop') or []):
-            f.append(f'template container {n} capabilities.drop lacks ALL')
+    psc = pod_spec.get('securityContext') or {}
+    if not isinstance(psc, dict):
+        raise ValueError(f'{where} pod securityContext not an object')
+    if not live and ('runAsUser' in psc or 'runAsGroup' in psc):
+        f.append(f'{where} pod runAsUser/runAsGroup fixed')
+    for kind in ('initContainers', 'containers'):
+        for c in pod_spec.get(kind) or []:
+            sc = c.get('securityContext') or {}
+            n = f"{where} {kind[:-1]} {c.get('name')}"
+            def eff(k):
+                return sc[k] if k in sc else psc.get(k)
+            if not live and ('runAsUser' in sc or 'runAsGroup' in sc):
+                f.append(f'{n} runAsUser/runAsGroup fixed')
+            if eff('runAsNonRoot') is not True:
+                f.append(f'{n} effective runAsNonRoot not true')
+            if (eff('seccompProfile') or {}).get('type') != 'RuntimeDefault':
+                f.append(f'{n} effective seccomp not RuntimeDefault')
+            if sc.get('readOnlyRootFilesystem') is not True:
+                f.append(f'{n} readOnlyRootFilesystem not true')
+            if sc.get('allowPrivilegeEscalation') is not False:
+                f.append(f'{n} allowPrivilegeEscalation not false')
+            if sc.get('privileged') is True:
+                f.append(f'{n} privileged')
+            if 'ALL' not in ((sc.get('capabilities') or {}).get('drop') or []):
+                f.append(f'{n} capabilities.drop lacks ALL')
     return f
+
+def app_container(pod_spec, name, where):
+    """앱 컨테이너를 순서가 아니라 이름으로 정확히 1개 찾는다(보완 3)."""
+    found = [c for c in pod_spec.get('containers') or [] if c.get('name') == name]
+    if len(found) != 1:
+        raise ValueError(f'{where}: app container {name} count={len(found)}')
+    return found[0]
 
 try:
     nsdoc = load('namespace')
@@ -184,6 +199,11 @@ for name, image in EXPECT.items():
         meta, spec, st = dep['metadata'], dep['spec'], dep.get('status') or {}
         if meta.get('namespace') != ns:
             raise ValueError('deployment namespace mismatch')
+        # 보완 2: 새 설정이 아직 반영되지 않았거나 일시정지면 revision이 옛 버전을 가리킬 수 있다 → 판정 전 중단.
+        if spec.get('paused') is True:
+            raise ValueError('deployment paused — current revision not settled')
+        if not isinstance(meta.get('generation'), int) or st.get('observedGeneration', -1) < meta['generation']:
+            raise ValueError(f"deployment observedGeneration {st.get('observedGeneration')} < generation {meta.get('generation')}")
         rev = (meta.get('annotations') or {}).get('deployment.kubernetes.io/revision')
         cur = [r for r in rss
                if any(o.get('kind') == 'Deployment' and o.get('uid') == meta['uid'] for o in r['metadata'].get('ownerReferences') or [])
@@ -191,41 +211,57 @@ for name, image in EXPECT.items():
         if not rev or len(cur) != 1:
             raise ValueError(f'current replicaset not unique (revision={rev}, found={len(cur)})')
         rs_uid = cur[0]['metadata']['uid']
-        mine = [p for p in pods
-                if any(o.get('kind') == 'ReplicaSet' and o.get('uid') == rs_uid for o in p['metadata'].get('ownerReferences') or [])]
+        rs_hash = (cur[0]['metadata'].get('labels') or {}).get('pod-template-hash')
+        if not rs_hash:
+            raise ValueError('current replicaset has no pod-template-hash label')
+        owned = [p for p in pods
+                 if any(o.get('kind') == 'ReplicaSet' and o.get('uid') == rs_uid for o in p['metadata'].get('ownerReferences') or [])]
+        for p in owned:
+            if (p['metadata'].get('labels') or {}).get('pod-template-hash') != rs_hash:
+                raise ValueError(f"pod {p['metadata'].get('name')} pod-template-hash differs from current replicaset")
+        # 보완 1: 종료 중인 Pod는 판정·개수에서 뺀다.
+        terminating = [p for p in owned if p['metadata'].get('deletionTimestamp')]
+        mine = [p for p in owned if not p['metadata'].get('deletionTimestamp')]
         replicas = spec.get('replicas')
         if not isinstance(replicas, int) or replicas < 1:
             raise ValueError(f'replicas={replicas!r}')
-        rollout_ok = (st.get('observedGeneration', -1) >= meta.get('generation', 0)
-                      and st.get('updatedReplicas') == replicas and st.get('readyReplicas') == replicas
-                      and st.get('availableReplicas') == replicas and len(mine) == replicas)
-        tmpl = template_findings(dep)
-        tmpl_images = [c.get('image') for c in spec['template']['spec'].get('containers') or []]
-        img_findings = [] if tmpl_images == [image] else [f'template image {tmpl_images}']
+        rollout_ok = (st.get('updatedReplicas') == replicas and st.get('readyReplicas') == replicas
+                      and st.get('availableReplicas') == replicas and not st.get('unavailableReplicas')
+                      and len(mine) == replicas and not terminating)
+        tpl_spec = spec['template']['spec']
+        tmpl = sec_findings('template', tpl_spec, live=False)
+        tpl_app = app_container(tpl_spec, name, 'template')
+        img_findings = [] if tpl_app.get('image') == image else [f"template image {tpl_app.get('image')}"]
         want_digest = image.rsplit('@', 1)[1]
         pod_rows = []
         for p in mine:
             pm, ps, pst = p['metadata'], p['spec'], p.get('status') or {}
             scc = (pm.get('annotations') or {}).get('openshift.io/scc')
-            cs = (ps.get('containers') or [{}])[0]
+            cs = app_container(ps, name, f"pod {pm.get('name')}")
             csc = cs.get('securityContext') or {}
             uid = csc.get('runAsUser', (ps.get('securityContext') or {}).get('runAsUser'))
-            statuses = pst.get('containerStatuses') or []
-            image_id = statuses[0].get('imageID', '') if statuses else ''
+            # 보완 3: status도 순서가 아니라 이름으로 맞춘다.
+            app_status = [s for s in pst.get('containerStatuses') or [] if s.get('name') == name]
+            if len(app_status) > 1:
+                raise ValueError(f"pod {pm.get('name')}: app container status count={len(app_status)}")
+            s0 = app_status[0] if app_status else {}
+            image_id = s0.get('imageID', '')
             got_digest = image_id.rsplit('@', 1)[1] if '@sha256:' in image_id else ''
+            # 보완 1: Pod Ready 조건(readiness gate 포함)과 앱 컨테이너 ready를 함께 본다.
+            pod_ready = any(c.get('type') == 'Ready' and c.get('status') == 'True' for c in pst.get('conditions') or [])
             pod_rows.append({
                 'pod': pm.get('name'), 'scc': scc, 'uid': uid, 'phase': pst.get('phase'),
-                'ready': bool(statuses) and all(s.get('ready') is True for s in statuses),
-                'restarts': sum(int(s.get('restartCount', 0)) for s in statuses),
+                'ready': pod_ready and s0.get('ready') is True and pst.get('phase') == 'Running',
+                'restarts': sum(int(s.get('restartCount', 0)) for s in pst.get('containerStatuses') or []),
                 'image': cs.get('image'), 'image_id': image_id,
-                'live_read_only_root': csc.get('readOnlyRootFilesystem'),
+                'live_findings': sec_findings(f"pod {pm.get('name')}", ps, live=True),
                 'scc_ok': scc == 'restricted-v2',
                 'uid_ok': isinstance(uid, int) and uid != 10001 and start <= uid < start + size,
                 'image_ok': cs.get('image') == image,
                 'digest_ok': got_digest == want_digest,
             })
         rows.append({'deployment': name, 'replicas': replicas, 'pods': pod_rows, 'rollout_ok': rollout_ok,
-                     'template_findings': tmpl, 'image_findings': img_findings})
+                     'terminating': len(terminating), 'template_findings': tmpl, 'image_findings': img_findings})
     except (ValueError, KeyError, TypeError, AttributeError, IndexError) as e:
         errors.append(f'{name}: {e}')
 
@@ -236,11 +272,11 @@ if errors or len(rows) != 2:
     code, summary = 11, 'COLLECTION_ERROR'
 elif any(any_pod(r, 'scc_ok') or any_pod(r, 'uid_ok') for r in rows):
     code, summary = 31, 'SCC_OR_UID_NOT_PORTABLE'
-elif any(r['template_findings'] or any(p['live_read_only_root'] is not True for p in r['pods']) for r in rows):
+elif any(r['template_findings'] or any(p['live_findings'] for p in r['pods']) for r in rows):
     code, summary = 32, 'SECURITY_CONTEXT_MISMATCH'
 elif any(r['image_findings'] or any_pod(r, 'image_ok') or any_pod(r, 'digest_ok') for r in rows):
     code, summary = 33, 'IMAGE_DIGEST_REVIEW_REQUIRED'
-elif any(not r['rollout_ok'] or any(not p['ready'] or p['phase'] != 'Running' for p in r['pods']) for r in rows):
+elif any(not r['rollout_ok'] or any_pod(r, 'ready') for r in rows):
     code, summary = 30, 'NOT_READY'
 else:
     code, summary = 0, 'OBSERVED_AS_EXPECTED'
@@ -251,12 +287,14 @@ json.dump(result, open(os.path.join(out, 'observe-result.json'), 'w'), indent=1,
 with open(os.path.join(out, 'observe-result.txt'), 'w') as f:
     f.write(f'UID_RANGE={start}/{size}\n')
     for r in rows:
-        f.write(f"{r['deployment']}\treplicas={r['replicas']}\trollout_ok={r['rollout_ok']}\n")
+        f.write(f"{r['deployment']}\treplicas={r['replicas']}\trollout_ok={r['rollout_ok']}\tterminating={r['terminating']}\n")
         for x in r['template_findings'] + r['image_findings']:
             f.write(f'  FINDING\t{x}\n')
         for p in r['pods']:
             f.write(f"  {p['pod']}\tscc={p['scc']}\tuid={p['uid']}\tphase={p['phase']}\tready={p['ready']}"
-                    f"\trestarts={p['restarts']}\tro_root={p['live_read_only_root']}\tdigest_ok={p['digest_ok']}\n")
+                    f"\trestarts={p['restarts']}\tlive_findings={len(p['live_findings'])}\tdigest_ok={p['digest_ok']}\n")
+            for x in p['live_findings']:
+                f.write(f'    FINDING\t{x}\n')
     for e in errors:
         f.write(f'ERROR\t{e}\n')
     f.write(f'SUMMARY={summary}\nCLUSTER_MUTATION=NONE\nWRITE_TEST=NOT_RUN\n')

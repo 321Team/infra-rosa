@@ -55,6 +55,8 @@ def ns():
                          'annotations': {'openshift.io/sa.scc.uid-range': rng,
                                          'openshift.io/sa.scc.supplemental-groups': '1000680000/10000'}}}
 
+SIDE = 'registry.invalid/fds/sidecar@sha256:' + 'e' * 64
+
 def csc(live, uid=None):
     sc = {'allowPrivilegeEscalation': False, 'privileged': False, 'readOnlyRootFilesystem': True,
           'capabilities': {'drop': ['ALL']}}
@@ -62,9 +64,27 @@ def csc(live, uid=None):
         sc['readOnlyRootFilesystem'] = False
     if scenario == 'drop_missing':
         sc['capabilities'] = {'drop': []}
+    if scenario == 'ctr_runasnonroot_false' and not live:
+        sc['runAsNonRoot'] = False          # 보완 4: Pod 값은 true지만 컨테이너가 덮어씀
+    if scenario == 'live_seccomp_unconfined' and live:
+        sc['seccompProfile'] = {'type': 'Unconfined'}   # 보완 4: template은 정상, live만 다름
+    if scenario == 'live_privesc' and live:
+        sc['allowPrivilegeEscalation'] = True
     if live and uid is not None:
         sc['runAsUser'] = uid
     return sc
+
+def containers(name, image, live, uid=None):
+    app = {'name': name, 'image': image, 'securityContext': csc(live, uid)}
+    if scenario == 'app_container_missing' and live:
+        app['name'] = name + '-renamed'
+    if scenario == 'sidecar_first':        # 보완 3: 앱이 첫 번째가 아니어도 이름으로 찾아야 한다
+        side = {'name': 'sidecar', 'image': SIDE,
+                'securityContext': {'allowPrivilegeEscalation': False, 'privileged': False,
+                                    'readOnlyRootFilesystem': True, 'capabilities': {'drop': ['ALL']},
+                                    **({'runAsUser': uid} if live and uid is not None else {})}}
+        return [side, app]
+    return [app]
 
 def dep(name):
     psc = {'runAsNonRoot': True, 'seccompProfile': {'type': 'RuntimeDefault'}}
@@ -74,17 +94,21 @@ def dep(name):
     if scenario == 'image_mismatch' and name == 'fds-engine':
         image = 'registry.invalid/fds/fds-engine@sha256:' + 'b' * 64
     ready = 2 if scenario == 'not_ready' and name == 'transaction-api' else 3
+    observed = 3 if scenario == 'not_observed' and name == 'fds-engine' else 4
+    spec = {'replicas': 3, 'template': {'spec': {'securityContext': psc, 'containers': containers(name, image, False)}}}
+    if scenario == 'paused' and name == 'transaction-api':
+        spec['paused'] = True
     return {'apiVersion': 'apps/v1', 'kind': 'Deployment',
             'metadata': {'name': name, 'namespace': 'fds-app', 'uid': 'dep-' + name, 'generation': 4,
                          'annotations': {'deployment.kubernetes.io/revision': '2'}},
-            'spec': {'replicas': 3, 'template': {'spec': {'securityContext': psc,
-                     'containers': [{'name': name, 'image': image, 'securityContext': csc(False)}]}}},
-            'status': {'observedGeneration': 4, 'replicas': 3, 'updatedReplicas': 3,
+            'spec': spec,
+            'status': {'observedGeneration': observed, 'replicas': 3, 'updatedReplicas': 3,
                        'readyReplicas': ready, 'availableReplicas': ready}}
 
 def rs(name, rev, suffix):
     return {'apiVersion': 'apps/v1', 'kind': 'ReplicaSet',
             'metadata': {'name': f'{name}-{suffix}', 'uid': f'rs-{name}-{suffix}',
+                         'labels': {'app': name, 'pod-template-hash': 'h' + suffix},
                          'annotations': {'deployment.kubernetes.io/revision': rev},
                          'ownerReferences': [{'kind': 'Deployment', 'uid': 'dep-' + name}]}}
 
@@ -99,14 +123,28 @@ def pod(name, suffix, i, rs_suffix):
     scc = 'anyuid' if scenario == 'scc_anyuid' and name == 'fds-engine' else 'restricted-v2'
     digest = 'c' * 64 if scenario == 'digest_child' and name == 'transaction-api' else D
     ready = not (scenario == 'not_ready' and name == 'transaction-api' and i == 0)
-    return {'apiVersion': 'v1', 'kind': 'Pod',
-            'metadata': {'name': f'{name}-{rs_suffix}-{i}', 'annotations': {'openshift.io/scc': scc},
-                         'ownerReferences': [{'kind': 'ReplicaSet', 'uid': f'rs-{name}-{rs_suffix}'}]},
-            'spec': {'securityContext': {'runAsNonRoot': True, 'fsGroup': 1000680000},
-                     'containers': [{'name': name, 'image': IMG[name], 'securityContext': csc(True, uid)}]},
-            'status': {'phase': 'Running', 'containerStatuses': [
-                {'name': name, 'ready': ready, 'restartCount': 0,
-                 'imageID': IMG[name].split('@')[0] + '@sha256:' + digest}]}}
+    # 보완 1: 컨테이너는 ready지만 Pod Ready 조건(readiness gate)이 False
+    pod_ready = not (scenario == 'pod_condition_not_ready' and name == 'fds-engine' and i == 1) and ready
+    phash = 'h' + rs_suffix
+    if scenario == 'hash_mismatch' and name == 'fds-engine' and i == 0 and rs_suffix == 'new':
+        phash = 'hother'
+    meta = {'name': f'{name}-{rs_suffix}-{i}', 'labels': {'app': name, 'pod-template-hash': phash},
+            'annotations': {'openshift.io/scc': scc},
+            'ownerReferences': [{'kind': 'ReplicaSet', 'uid': f'rs-{name}-{rs_suffix}'}]}
+    if suffix == 'terminating':
+        meta['deletionTimestamp'] = '2026-10-15T00:00:00Z'
+    statuses = [{'name': name, 'ready': ready, 'restartCount': 0,
+                 'imageID': IMG[name].split('@')[0] + '@sha256:' + digest}]
+    if scenario == 'sidecar_first':        # status 순서도 앱이 뒤
+        statuses.insert(0, {'name': 'sidecar', 'ready': True, 'restartCount': 0,
+                            'imageID': SIDE.split('@')[0] + '@sha256:' + 'f' * 64})
+    return {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': meta,
+            'spec': {'securityContext': {'runAsNonRoot': True, 'fsGroup': 1000680000,
+                                         'seccompProfile': {'type': 'RuntimeDefault'}},
+                     'containers': containers(name, IMG[name], True, uid)},
+            'status': {'phase': 'Running',
+                       'conditions': [{'type': 'Ready', 'status': 'True' if pod_ready else 'False'}],
+                       'containerStatuses': statuses}}
 
 def lst(items):
     return {'apiVersion': 'v1', 'kind': 'List', 'items': items}
@@ -129,6 +167,8 @@ elif 'get pod' in args:
         count = 2 if scenario == 'pod_count_less' and n == 'fds-engine' else 3
         items += [pod(n, 'new', i, 'new') for i in range(count)]
         items.append(pod(n, 'old', 9, 'old'))  # 이전 ReplicaSet Pod는 판정에서 빠져야 한다
+        if scenario == 'terminating_pod' and n == 'transaction-api':
+            items.append(pod(n, 'terminating', 7, 'new'))  # 보완 1: 현재 RS의 종료 중 Pod
     if scenario == 'pods_wrong_kind':
         items[0]['kind'] = 'Deployment'
     doc = lst(items)
@@ -182,7 +222,7 @@ check cluster_403 10 yes SCENARIO=cluster_403
 check ns_mismatch 10 yes SCENARIO=ok EXPECTED_NS_UID=00000000-0000-0000-0000-000000000000
 
 # 수집 오류
-for s in deploy_missing pods_403 rs_ambiguous bad_range pods_wrong_kind partial_json; do
+for s in deploy_missing pods_403 rs_ambiguous bad_range pods_wrong_kind partial_json not_observed paused hash_mismatch app_container_missing; do
   check "$s" 11 yes SCENARIO="$s"; summary_is "$s" COLLECTION_ERROR
 done
 
@@ -190,13 +230,13 @@ done
 for s in scc_anyuid uid_fixed uid_out_of_range uid_missing; do
   check "$s" 31 yes SCENARIO="$s"; summary_is "$s" SCC_OR_UID_NOT_PORTABLE
 done
-for s in tmpl_fixed_uid ro_false drop_missing; do
+for s in tmpl_fixed_uid ro_false drop_missing ctr_runasnonroot_false live_seccomp_unconfined live_privesc; do
   check "$s" 32 yes SCENARIO="$s"; summary_is "$s" SECURITY_CONTEXT_MISMATCH
 done
 for s in image_mismatch digest_child; do
   check "$s" 33 yes SCENARIO="$s"; summary_is "$s" IMAGE_DIGEST_REVIEW_REQUIRED
 done
-for s in not_ready pod_count_less; do
+for s in not_ready pod_count_less pod_condition_not_ready terminating_pod; do
   check "$s" 30 yes SCENARIO="$s"; summary_is "$s" NOT_READY
 done
 
@@ -209,6 +249,10 @@ grep -q '^CLUSTER_MUTATION=NONE$' "$T/out-ok/observe-result.txt"
 grep -q '^WRITE_TEST=NOT_RUN$' "$T/out-ok/observe-result.txt"
 grep -q "^COLLECTOR_SHA256=$(sha256sum "$SCRIPT" | cut -d' ' -f1)$" "$T/out-ok/context.txt"
 (cd "$T/out-ok" && sha256sum -c --quiet SHA256SUMS)
+
+# 보완 3: 사이드카가 앞에 있어도 앱 컨테이너·status를 이름으로 찾아 정상 판정
+check sidecar_first 0 yes SCENARIO=sidecar_first
+summary_is sidecar_first OBSERVED_AS_EXPECTED
 
 # 기존 OUT_DIR는 덮어쓰지 않음
 check reuse 2 no SCENARIO=ok OUT_DIR="$T/out-ok"

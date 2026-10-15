@@ -198,20 +198,20 @@ admission 수집기(위 절)가 "허용될지"를 묻는다면, 이 도구는 **
 
 **하는 일(get만, 클러스터 변경 없음)**
 1. admission 수집기와 같은 대상 고정을 씁니다. context 서버·`API` 대조(첫 API 요청 전), Cluster ID·NS UID를 승인 inventory 값과 대조, System namespace 거부.
-2. `transaction-api`·`fds-engine` Deployment, 그 소유 ReplicaSet, Pod를 get합니다. **현재 revision의 ReplicaSet이 소유한 Pod만** 판정합니다. 이전 revision Pod는 뺍니다.
+2. `transaction-api`·`fds-engine` Deployment, 그 소유 ReplicaSet, Pod를 get합니다. **현재 revision의 ReplicaSet이 소유하고 `pod-template-hash`가 같은 Pod만** 판정합니다. 이전 revision Pod와 종료 중인 Pod(`deletionTimestamp`)는 뺍니다. Deployment가 일시정지(`paused`)이거나 `observedGeneration`이 `generation`보다 작으면 revision이 옛 버전을 가리킬 수 있어 **판정하지 않고 11로 멈춥니다**.
 3. 판정
    - Pod 주석 `openshift.io/scc=restricted-v2`
    - SCC가 배정한 UID가 namespace `uid-range` 안에 있고 10001이 아닐 것
-   - Deployment template이 portable일 것: UID/GID 고정 없음, `runAsNonRoot`, RuntimeDefault, 읽기 전용 루트, 권한 상승 금지, `drop ALL`
-   - live Pod의 읽기 전용 루트
+   - 보안 설정을 **유효값**(컨테이너 값이 있으면 그것, 없으면 Pod 값)으로 판정하고, Deployment template과 live Pod에 같이 적용합니다(init 컨테이너 포함): `runAsNonRoot` true, seccomp RuntimeDefault, 읽기 전용 루트, 권한 상승 금지, privileged 아님, `drop ALL`. template에는 UID/GID 고정이 없어야 합니다(live Pod의 runAsUser는 SCC 배정값이라 UID 판정에서 따로 봅니다)
+   - 앱 컨테이너와 그 status는 **순서가 아니라 이름**(앱 이름과 같은 것)으로 정확히 1개 찾습니다. sidecar가 있어도 앱 컨테이너만 이미지·digest·ready를 판정합니다
    - 이미지 참조와 `imageID` digest가 승인값과 같을 것
-   - rollout 완료와 Ready
+   - rollout 완료(updated·ready·available = replicas, unavailable 없음, 종료 중 Pod 없음)와 Ready(Pod `Ready` 조건 True — readiness gate 포함 — 이면서 앱 컨테이너 ready, phase Running)
 
 | 종료 코드 | 의미 |
 |---:|---|
 | 0 | 위 판정을 모두 만족 |
 | 2 / 10 | 입력 오류 / 대상 불일치 (admission 수집기와 같음) |
-| 11 | 수집·파싱 오류: 조회 rc≠0, 형식 이상, Deployment·현재 ReplicaSet 누락, uid-range 주석 이상 |
+| 11 | 수집·파싱 오류 또는 판정 불가: 조회 rc≠0, 형식 이상, Deployment·현재 ReplicaSet 누락, `pod-template-hash` 불일치, 앱 컨테이너 없음·중복, uid-range 주석 이상, Deployment 일시정지·`observedGeneration` 지연 |
 | 31 | SCC가 `restricted-v2`가 아님, 또는 UID가 10001·범위 밖·미배정 |
 | 32 | SecurityContext가 portable 계약과 다름 |
 | 33 | 이미지 참조 또는 digest가 다름. 멀티아키텍처 index digest와 실행 child digest 차이일 수 있어 **사람이 확인**하고, PASS로 쓰지 않습니다 |
@@ -221,5 +221,5 @@ admission 수집기(위 절)가 "허용될지"를 묻는다면, 이 도구는 **
 
 - **하지 않는 것:** exec·port-forward·debug를 포함한 모든 쓰기와 Pod 안 명령. 그래서 "읽기 전용 루트에서 실제 쓰기가 errno 30으로 막히는지"는 확인하지 않습니다(`WRITE_TEST=NOT_RUN`). 필요하면 exec 범위를 정해 별도로 승인받습니다.
 - **실행 시점:** #46 배포 이후, 배포 receipt의 이미지 값(`TX_IMAGE`/`ENG_IMAGE`)으로 실행합니다. 실행 권한은 `fds-app` 읽기와 `get clusterversion`입니다(admission과 같은 현장 확인 항목).
-- **MOCK 시험:** `bash precheck/portability/tests/pg03-observe-mock.sh`(Linux). 입력 거부 9, 대상 불일치 4, 수집 오류 6, 판정 분기 11(31×4, 32×3, 33×2, 30×2), 정상 1(이전 ReplicaSet Pod 제외 확인), 기존 OUT_DIR 보존 1. 모든 경우 쓰기 명령 0건, 고정되지 않은 oc 호출 0건을 확인합니다.
-- 상태: MOCK 32건 PASS — `24dcf78`, 2026-10-15 KST, 개인 AWS CloudShell(`env -i` 격리, 기존 admission MOCK 37·input-contract도 같은 회차 PASS), 묶음 `pg03-observe-mock-24dcf78.tgz` SHA-256 `9b717628094aa75b1e5ee180b8f63a1ffe4f357ca0c0d8327cf53e70426a6369`(CloudShell 보관). 실제 oc·ROSA RUNTIME은 NOT RUN. PG03=HOLD.
+- **MOCK 시험:** `bash precheck/portability/tests/pg03-observe-mock.sh`(Linux). 입력 거부 9, 대상 불일치 4, 수집 오류·판정 불가 10(Deployment NotFound, Pod 403, 현재 RS 중복, uid-range 이상, 잘못된 kind, 잘린 JSON, observedGeneration 지연, paused, pod-template-hash 불일치, 앱 컨테이너 없음), 판정 분기 16(31×4, 32×6 — 컨테이너 수준 runAsNonRoot false·live seccomp Unconfined·live 권한 상승 포함, 33×2, 30×4 — Pod Ready 조건 False·종료 중 Pod 포함), 정상 2(이전 ReplicaSet Pod 제외, sidecar가 앞에 있어도 이름으로 결속), 기존 OUT_DIR 보존 1. 총 42건. 모든 경우 쓰기 명령 0건, 고정되지 않은 oc 호출 0건을 확인합니다.
+- 상태: 보완 4건(Ready 판정·이전 replica 결속·컨테이너 결속·유효 보안 설정) 반영 HEAD의 MOCK 42건은 **NOT RUN**(Linux 실행 후 기록). 이전 `24dcf78`의 MOCK 32건 PASS(2026-10-15, 묶음 SHA-256 `9b717628094aa75b1e5ee180b8f63a1ffe4f357ca0c0d8327cf53e70426a6369`)는 그 HEAD 기록입니다. 실제 oc·ROSA RUNTIME은 NOT RUN. PG03=HOLD.
