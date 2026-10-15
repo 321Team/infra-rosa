@@ -1,0 +1,40 @@
+# infra-rosa#5 ⑤ — Business Namespace 3개 (정의 v3 §2, 결정 6096648289)
+# PSA/SCC label 은 #6 범위라 넣지 않는다.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fds-app
+  labels:
+    team: 321team
+    project: fds-hybrid
+    purpose: app
+  annotations:
+    fds-hybrid/owner: hayeounglee
+    fds-hybrid/ticket: 321Team/infra-rosa#5
+    fds-hybrid/expires: rosa-cluster-teardown
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring-api
+  labels:
+    team: 321team
+    project: fds-hybrid
+    purpose: monitoring
+  annotations:
+    fds-hybrid/owner: hayeounglee
+    fds-hybrid/ticket: 321Team/infra-rosa#5
+    fds-hybrid/expires: rosa-cluster-teardown
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ci-cd
+  labels:
+    team: 321team
+    project: fds-hybrid
+    purpose: cicd
+  annotations:
+    fds-hybrid/owner: hayeounglee
+    fds-hybrid/ticket: 321Team/infra-rosa#5
+    fds-hybrid/expires: rosa-cluster-teardown

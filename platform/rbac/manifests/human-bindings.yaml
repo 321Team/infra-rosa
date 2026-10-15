@@ -1,0 +1,65 @@
+# infra-rosa#5 ⑧ — 사람 계정 RoleBinding (첫 설정 순서 v2 §1, 3명)
+# htpasswd user 이름(hayeoung/gwonuk/jaehwan)은 ① IdP 생성 때 이 값으로 고정한다.
+# 하영 monitoring-edit 은 여기 넣지 않는다 — ⑬ 회수 뒤 실제 세션에서 부족할 때만 ⑮ break-glass 회차.
+# --- 이하영: 3개 ns admin
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: hayeoung-admin, namespace: fds-app, labels: {team: 321team, project: fds-hybrid, purpose: app}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: hayeoung}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: hayeoung-admin, namespace: monitoring-api, labels: {team: 321team, project: fds-hybrid, purpose: monitoring}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: hayeoung}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: hayeoung-admin, namespace: ci-cd, labels: {team: 321team, project: fds-hybrid, purpose: cicd}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: admin}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: hayeoung}]
+---
+# --- 이권욱: 3개 ns view
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: gwonuk-view, namespace: fds-app, labels: {team: 321team, project: fds-hybrid, purpose: app}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: gwonuk}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: gwonuk-view, namespace: monitoring-api, labels: {team: 321team, project: fds-hybrid, purpose: monitoring}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: gwonuk}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: gwonuk-view, namespace: ci-cd, labels: {team: 321team, project: fds-hybrid, purpose: cicd}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: gwonuk}]
+---
+# --- 이재환: 3개 ns view + fds-app monitoring-edit (baseline#25)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: jaehwan-view, namespace: fds-app, labels: {team: 321team, project: fds-hybrid, purpose: app}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: jaehwan}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: jaehwan-view, namespace: monitoring-api, labels: {team: 321team, project: fds-hybrid, purpose: monitoring}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: jaehwan}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: jaehwan-view, namespace: ci-cd, labels: {team: 321team, project: fds-hybrid, purpose: cicd}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: view}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: jaehwan}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: jaehwan-monitoring-edit, namespace: fds-app, labels: {team: 321team, project: fds-hybrid, purpose: monitoring}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: monitoring-edit}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: jaehwan}]
