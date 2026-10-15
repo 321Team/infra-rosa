@@ -222,4 +222,4 @@ admission 수집기(위 절)가 "허용될지"를 묻는다면, 이 도구는 **
 - **하지 않는 것:** exec·port-forward·debug를 포함한 모든 쓰기와 Pod 안 명령. 그래서 "읽기 전용 루트에서 실제 쓰기가 errno 30으로 막히는지"는 확인하지 않습니다(`WRITE_TEST=NOT_RUN`). 필요하면 exec 범위를 정해 별도로 승인받습니다.
 - **실행 시점:** #46 배포 이후, 배포 receipt의 이미지 값(`TX_IMAGE`/`ENG_IMAGE`)으로 실행합니다. 실행 권한은 `fds-app` 읽기와 `get clusterversion`입니다(admission과 같은 현장 확인 항목).
 - **MOCK 시험:** `bash precheck/portability/tests/pg03-observe-mock.sh`(Linux). 입력 거부 9, 대상 불일치 4, 수집 오류 6, 판정 분기 11(31×4, 32×3, 33×2, 30×2), 정상 1(이전 ReplicaSet Pod 제외 확인), 기존 OUT_DIR 보존 1. 모든 경우 쓰기 명령 0건, 고정되지 않은 oc 호출 0건을 확인합니다.
-- 상태: STATIC만 확인. MOCK·실제 oc·ROSA RUNTIME은 NOT RUN. PG03=HOLD.
+- 상태: MOCK 32건 PASS — `24dcf78`, 2026-10-15 KST, 개인 AWS CloudShell(`env -i` 격리, 기존 admission MOCK 37·input-contract도 같은 회차 PASS), 묶음 `pg03-observe-mock-24dcf78.tgz` SHA-256 `9b717628094aa75b1e5ee180b8f63a1ffe4f357ca0c0d8327cf53e70426a6369`(CloudShell 보관). 실제 oc·ROSA RUNTIME은 NOT RUN. PG03=HOLD.
