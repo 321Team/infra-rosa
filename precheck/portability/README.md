@@ -186,11 +186,12 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
 - 실행 권한: Cluster ID 조회(`clusterversion` get)와 namespace·SA 조회, `scc-subject-review`가 필요합니다. 이 권한이 named user의 namespace admin에 없으면 #5에서 정한 승인된 조회 주체로 실행합니다. 배포 SA(`ci-cd/fds-deployer`)에 권한을 더하지 않습니다.
 - 결과의 의미: admission **참고 근거**입니다. 실제 SCC annotation·UID·기동 확인을 대체하지 않으며, 이 도구의 rc0이 PG03 PASS는 아닙니다.
 - **Runtime(실제 Pod 기동) 시험은 이 PR에서 뺐습니다.** 기존 자원 보존(동명 자원 존재 시 첫 변경 전 STOP), 실행별 이름·UID 장부, 장부 기준 정리·잔여 판정, 별도 시험 실행자 범위를 설계한 뒤 별도 PR로 리뷰받습니다.
-- MOCK 시험: `bash precheck/portability/tests/pg03-mock.sh`(가짜 oc, 37건). Linux(bash·python3·git·GNU coreutils)에서 실행합니다. Windows Python은 줄바꿈·경로 처리가 달라 결과로 쓰지 않습니다.
+- MOCK 시험: `bash precheck/portability/tests/pg03-mock.sh`(가짜 oc, 40건). Linux(bash·python3·git·GNU coreutils)에서 실행합니다. Windows Python은 줄바꿈·경로 처리가 달라 결과로 쓰지 않습니다.
   - 기존 22건: 입력 거부 7건(oc 호출 0), 서버 불일치(API 요청 0), Cluster ID 불일치·403, NS UID 불일치, 리뷰 rc7(지원 안 되는 객체), 부분 출력, Deployment 누락, SA 403, portable 거부·넓은 SCC, fixed의 restricted-v2·넓은 SCC 허용, 정상, SA NotFound 기록, 기존 OUT_DIR 보존
   - 응답 형식 15건(리뷰 B4): 깨진 응답 14건이 RC11인지 확인합니다. 빈 문서, 다른 kind·apiVersion, status null·빈 객체·문자열, allowedBy 문자열·빈 name, reason 타입 오류·빈 reason, template null·배열·문자열이 여기에 들어갑니다. 나머지 1건은 template만 있는 정상 거부가 RC0인지 확인합니다
+  - 마지막 namespace 확인 3건(PR39 R3와 같은 보완): 판정이 정상이어도 종료 시 namespace 조회가 다른 UID·빈 출력 실패·UID 출력 후 실패이면 RC10이고 SHA256SUMS로 마감하지 않는지 확인합니다
   - 모든 경우 쓰기 명령 0건을 확인합니다.
-- 상태: STATIC(`bash -n`)만 확인했습니다. MOCK 37건은 Linux 실행 결과와 원본을 PR에 연결하기 전까지 NOT RUN입니다. 과거 `728d116`의 MOCK 22건 PASS는 그 HEAD의 기록입니다. 실제 oc·kustomize 렌더와 SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
+- 상태: 마지막 namespace 확인 RC 보완 후 MOCK 40건 PASS — `b7a9186`, 2026-10-16 KST, 개인 AWS CloudShell(`env -i` 격리, 같은 회차 input-contract PASS), 묶음 `pg03-r3-3ff835b-b7a9186.tgz` SHA-256 `04f2c499947cfb35c0a3b2186765cd1892ce7954965ee98b47d7288802ee4158`(CloudShell 보관). 이전 기록: `5585754` MOCK 37건 PASS(2026-10-11 KST CloudShell, 원본 [evidence PR #204](https://github.com/321Team/fds-project-evidence/pull/204) 병합 `5dbaf89`), 그 전 `728d116` MOCK 22건 PASS. 실제 oc·kustomize 렌더와 SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
 
 ## 생성 직후 실행 안내
 
