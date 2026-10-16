@@ -191,7 +191,7 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
   - 응답 형식 15건(리뷰 B4): 깨진 응답 14건이 RC11인지 확인합니다. 빈 문서, 다른 kind·apiVersion, status null·빈 객체·문자열, allowedBy 문자열·빈 name, reason 타입 오류·빈 reason, template null·배열·문자열이 여기에 들어갑니다. 나머지 1건은 template만 있는 정상 거부가 RC0인지 확인합니다
   - 마지막 namespace 확인 3건(PR39 R3와 같은 보완): 판정이 정상이어도 종료 시 namespace 조회가 다른 UID·빈 출력 실패·UID 출력 후 실패이면 RC10이고 SHA256SUMS로 마감하지 않는지 확인합니다
   - 모든 경우 쓰기 명령 0건을 확인합니다.
-- 상태: 이번 변경(마지막 namespace 확인 RC) HEAD의 MOCK 40건은 **NOT RUN**(Linux 실행 후 기록). 이전 기록: `5585754` MOCK 37건 PASS(2026-10-11 KST CloudShell, 원본 [evidence PR #204](https://github.com/321Team/fds-project-evidence/pull/204) 병합 `5dbaf89`), 그 전 `728d116` MOCK 22건 PASS. 실제 oc·kustomize 렌더와 SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
+- 상태: 마지막 namespace 확인 RC 보완 후 MOCK 40건 PASS — `b7a9186`, 2026-10-16 KST, 개인 AWS CloudShell(`env -i` 격리, 같은 회차 input-contract PASS), 묶음 `pg03-r3-3ff835b-b7a9186.tgz` SHA-256 `04f2c499947cfb35c0a3b2186765cd1892ce7954965ee98b47d7288802ee4158`(CloudShell 보관). 이전 기록: `5585754` MOCK 37건 PASS(2026-10-11 KST CloudShell, 원본 [evidence PR #204](https://github.com/321Team/fds-project-evidence/pull/204) 병합 `5dbaf89`), 그 전 `728d116` MOCK 22건 PASS. 실제 oc·kustomize 렌더와 SHARED_OCP·ROSA RUNTIME은 실행하지 않았습니다. PG03=HOLD.
 
 ## 생성 직후 실행 안내
 
