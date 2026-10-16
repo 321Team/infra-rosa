@@ -281,8 +281,10 @@ PY
 RESULT=$?
 set -e
 
-[[ "$("${OC[@]}" get namespace "$NS" -o 'jsonpath={.metadata.uid}')" == "$EXPECTED_NS_UID" ]] \
-  || die 10 "실행 중 namespace UID 변경"
+# 마지막 대상 확인도 시각·출력·RC를 남기고, rc=0과 UID 일치를 함께 본다(PR39 R3와 같은 보완).
+run namespace-final "${OC[@]}" get namespace "$NS" -o 'jsonpath={.metadata.uid}'
+[[ "$(rc_of namespace-final)" == 0 && "$(cat "$OUT_DIR/namespace-final.out")" == "$EXPECTED_NS_UID" ]] \
+  || die 10 "실행 중 namespace UID 변경 또는 최종 조회 실패(namespace-final.err 확인)"
 (cd "$OUT_DIR" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
 cat "$OUT_DIR/admission-result.txt"
 echo "EVIDENCE_DIR=$OUT_DIR"
