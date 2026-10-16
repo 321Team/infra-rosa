@@ -25,6 +25,10 @@ case "$args" in
     [[ "$SCENARIO" == cluster_403 ]] && { echo 'Error from server (Forbidden)' >&2; exit 1; }
     printf '11111111-2222-3333-4444-555555555555'; exit 0;;
   "get namespace fds-app -o jsonpath={.metadata.uid}")
+    # R3: 마지막 대상 확인 — 다른 UID, 빈 출력+실패, UID 출력 후 실패
+    [[ "$SCENARIO" == final_ns_diff ]] && { printf '99999999-0000-0000-0000-000000000000'; exit 0; }
+    [[ "$SCENARIO" == final_ns_fail_empty ]] && { echo 'Error from server (Forbidden)' >&2; exit 1; }
+    [[ "$SCENARIO" == final_ns_fail_with_uid ]] && { printf 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; echo 'error: unexpected EOF' >&2; exit 1; }
     printf 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; exit 0;;
   whoami) echo mock-user; exit 0;;
   version) echo 'MOCK oc'; exit 0;;
@@ -235,6 +239,11 @@ check server_mismatch 10 no SCENARIO=server_mismatch
 check cluster_mismatch 10 yes SCENARIO=cluster_mismatch
 check cluster_403 10 yes SCENARIO=cluster_403
 check ns_mismatch 10 yes SCENARIO=ok EXPECTED_NS_UID=00000000-0000-0000-0000-000000000000
+# R3: 판정이 정상이어도 마지막 namespace 확인이 실패하면 10(SHA256SUMS로 마감하지 않음)
+for s in final_ns_diff final_ns_fail_empty final_ns_fail_with_uid; do
+  check "$s" 10 yes SCENARIO="$s"
+  [[ -f "$T/out-$s/namespace-final.rc" && ! -f "$T/out-$s/SHA256SUMS" ]] || { echo "FAIL $s: final check not recorded or evidence sealed"; exit 1; }
+done
 
 # 수집 오류
 for s in deploy_missing pods_403 rs_ambiguous bad_range pods_wrong_kind partial_json not_observed paused hash_mismatch app_container_missing; do
