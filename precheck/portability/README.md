@@ -196,3 +196,37 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
 ## 생성 직후 실행 안내
 
 ROSA 생성 뒤 CloudShell에서 이 수집기를 돌리는 순서(oc 설치·입력값 출처·결과 해석·증적 반출)는 [RUN-ROSA-ADMISSION.md](RUN-ROSA-ADMISSION.md)에 있습니다.
+
+## 2026-10-15 infra-rosa#6 PG-03 실제 배포 Pod 관측 (`pg03-rosa-observe.sh`, 6-2 Runtime)
+
+admission 수집기(위 절)가 "허용될지"를 묻는다면, 이 도구는 **#43/#46이 실제로 배포한 Pod가 어떻게 떴는지**를 읽기만 해서 확인합니다. 앱을 따로 띄우지 않으므로 PR36 리뷰 B1/B2의 소유권·정리 문제가 생기지 않습니다.
+
+**하는 일(get만, 클러스터 변경 없음)**
+1. admission 수집기와 같은 대상 고정을 씁니다. context 서버·`API` 대조(첫 API 요청 전), Cluster ID·NS UID를 승인 inventory 값과 대조, System namespace 거부. 판정이 끝난 뒤 namespace UID를 **다시 조회해 rc=0이고 같을 때만** 증적을 마감합니다(아니면 10, `namespace-final.*`에 원본).
+2. `transaction-api`·`fds-engine` Deployment, 그 소유 ReplicaSet, Pod를 get합니다. **현재 revision의 ReplicaSet이 소유하고 `pod-template-hash`가 같은 Pod만** 판정합니다. 이전 revision Pod와 종료 중인 Pod(`deletionTimestamp`)는 뺍니다. Deployment가 일시정지(`paused`)이거나 `observedGeneration`이 `generation`보다 작으면 revision이 옛 버전을 가리킬 수 있어 **판정하지 않고 11로 멈춥니다**.
+3. 판정
+   - Pod 주석 `openshift.io/scc=restricted-v2`
+   - SCC가 배정한 UID가 namespace `uid-range` 안에 있고 10001이 아닐 것
+   - 보안 설정을 **유효값**(컨테이너 값이 있으면 그것, 없으면 Pod 값)으로 판정하고, Deployment template과 live Pod에 같이 적용합니다(init 컨테이너 포함): `runAsNonRoot` true, seccomp RuntimeDefault, 읽기 전용 루트, 권한 상승 금지, privileged 아님, `drop ALL`. template에는 UID/GID 고정이 없어야 합니다(live Pod의 runAsUser는 SCC 배정값이라 UID 판정에서 따로 봅니다)
+   - **승인 입력은 앱마다 컨테이너 1개**(`TX_IMAGE`/`ENG_IMAGE`)입니다. template·live Pod에 그 밖의 container·init·ephemeral 컨테이너가 있으면 UID·이미지·digest를 결속할 승인 입력이 없으므로 **판정하지 않고 11로 멈춥니다**(sidecar 일반 지원은 승인 목록 입력 계약을 따로 만든 뒤). 앱 컨테이너와 그 status는 이름으로 정확히 1개씩 찾습니다
+   - 이미지 참조와 `imageID` digest가 승인값과 같을 것
+   - rollout 완료(전체 `status.replicas`·updated·ready·available = replicas — 옛 ReplicaSet Pod가 남아 있으면 미완료, unavailable 없음, 종료 중 Pod 없음)와 Ready(Pod `Ready` 조건 True — readiness gate 포함 — 이면서 앱 컨테이너 ready, phase Running)
+
+| 종료 코드 | 의미 |
+|---:|---|
+| 0 | 위 판정을 모두 만족 |
+| 2 / 10 | 입력 오류 / 대상 불일치 (admission 수집기와 같음) |
+| 11 | 수집·파싱 오류 또는 판정 불가: 조회 rc≠0, 형식 이상, Deployment·현재 ReplicaSet 누락, `pod-template-hash` 불일치, 앱 컨테이너 없음·중복, **승인 입력 밖 컨테이너(추가 container·init·ephemeral)**, 앱 status가 정확히 1개가 아님, uid-range 주석 이상, Deployment 일시정지·`observedGeneration` 지연 |
+| 31 | SCC가 `restricted-v2`가 아님, 또는 UID가 10001·범위 밖·미배정 |
+| 32 | SecurityContext가 portable 계약과 다름 |
+| 33 | 이미지 참조 또는 digest가 다름. 멀티아키텍처 index digest와 실행 child digest 차이일 수 있어 **사람이 확인**하고, PASS로 쓰지 않습니다 |
+| 30 | rollout 미완료 또는 Ready 아님. transaction-api Ready에는 DB 경로가 필요합니다(#43/#47) |
+
+여러 문제가 겹치면 11 > 31 > 32 > 33 > 30 순서로 종료 코드를 고르고, 행별 결과는 `observe-result.{txt,json}`에 모두 남깁니다.
+
+**11을 읽는 법(아직 뜨는 중인 Pod):** 앱 container status가 정확히 1개가 아니면 11로 멈춥니다. 그래서 스케줄 전·이미지 받는 중처럼 status가 아직 없는 Pod도 11로 나옵니다(30보다 보수적인 쪽). 11이 나오면 `observe-result.txt`의 `ERROR` 줄과 `pods.out`에서 해당 Pod의 `status.containerStatuses`가 비어 있는지 먼저 봅니다. 비어 있고 phase가 `Pending`이면 "수집 오류"가 아니라 "아직 기동 중"일 수 있으니, 결과를 보존한 채 잠시 뒤 **새 OUT_DIR로** 다시 관측합니다. 같은 Pod가 계속 그 상태이면 기동 실패로 보고 원인(이벤트·이미지 pull)을 따로 확인합니다. 판정 기준은 바꾸지 않습니다.
+
+- **하지 않는 것:** exec·port-forward·debug를 포함한 모든 쓰기와 Pod 안 명령. 그래서 "읽기 전용 루트에서 실제 쓰기가 errno 30으로 막히는지"는 확인하지 않습니다(`WRITE_TEST=NOT_RUN`). 필요하면 exec 범위를 정해 별도로 승인받습니다.
+- **실행 시점:** #46 배포 이후, 배포 receipt의 이미지 값(`TX_IMAGE`/`ENG_IMAGE`)으로 실행합니다. 실행 권한은 `fds-app` 읽기와 `get clusterversion`입니다(admission과 같은 현장 확인 항목).
+- **MOCK 시험:** `bash precheck/portability/tests/pg03-observe-mock.sh`(Linux). 입력 거부 9, 대상 불일치 7(마지막 namespace 확인의 다른 UID·빈 출력 실패·UID 출력 후 실패 포함), 수집 오류·판정 불가 16(Deployment NotFound, Pod 403, 현재 RS 중복, uid-range 이상, 잘못된 kind, 잘린 JSON, observedGeneration 지연, paused, pod-template-hash 불일치, 앱 컨테이너 없음, sidecar 공존, template만 추가 컨테이너, 미승인 live sidecar(UID 10001·`:latest`), live init 컨테이너, 앱 status 누락, status 2개), 판정 분기 17(31×4, 32×6, 33×2, 30×5 — Pod Ready 조건 False·종료 중 Pod·옛 replica 잔존 포함), 정상 1(이전 ReplicaSet Pod 제외), 기존 OUT_DIR 보존 1. 총 51건. 모든 경우 쓰기 명령 0건, 고정되지 않은 oc 호출 0건을 확인합니다.
+- 상태: PR39 R3(마지막 namespace 확인 RC) 반영 후 MOCK 51건 PASS — `3ff835b`, 2026-10-16 KST, 개인 AWS CloudShell(`env -i` 격리, 같은 회차 admission 수정본 MOCK 40·input-contract도 PASS), 묶음 `pg03-r3-3ff835b-b7a9186.tgz` SHA-256 `04f2c499947cfb35c0a3b2186765cd1892ce7954965ee98b47d7288802ee4158`(CloudShell 보관). 이전 기록: R1·R2 반영 후 MOCK 48건 PASS — `38e6d81`, 2026-10-16 KST, 개인 AWS CloudShell(`env -i` 격리, 기존 admission MOCK 37·input-contract도 같은 회차 PASS), 묶음 `pg03-observe-mock-38e6d81.tgz` SHA-256 `40a2bb35e8dcd06020cbac968721ece382fdbddc683abb634b6c938f401606cf`(CloudShell 보관). 이전 기록: `cd387da` MOCK 42건 PASS(묶음 SHA-256 `3de9132a0ab45429833dc4c854e5e18f2fb7276ed1ef855dfd0eddde4427192d`), `24dcf78` MOCK 32건 PASS(`9b717628…`). 실제 oc·ROSA RUNTIME은 NOT RUN. PG03=HOLD.
