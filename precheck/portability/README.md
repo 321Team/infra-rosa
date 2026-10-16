@@ -224,6 +224,8 @@ admission 수집기(위 절)가 "허용될지"를 묻는다면, 이 도구는 **
 
 여러 문제가 겹치면 11 > 31 > 32 > 33 > 30 순서로 종료 코드를 고르고, 행별 결과는 `observe-result.{txt,json}`에 모두 남깁니다.
 
+**11을 읽는 법(아직 뜨는 중인 Pod):** 앱 container status가 정확히 1개가 아니면 11로 멈춥니다. 그래서 스케줄 전·이미지 받는 중처럼 status가 아직 없는 Pod도 11로 나옵니다(30보다 보수적인 쪽). 11이 나오면 `observe-result.txt`의 `ERROR` 줄과 `pods.out`에서 해당 Pod의 `status.containerStatuses`가 비어 있는지 먼저 봅니다. 비어 있고 phase가 `Pending`이면 "수집 오류"가 아니라 "아직 기동 중"일 수 있으니, 결과를 보존한 채 잠시 뒤 **새 OUT_DIR로** 다시 관측합니다. 같은 Pod가 계속 그 상태이면 기동 실패로 보고 원인(이벤트·이미지 pull)을 따로 확인합니다. 판정 기준은 바꾸지 않습니다.
+
 - **하지 않는 것:** exec·port-forward·debug를 포함한 모든 쓰기와 Pod 안 명령. 그래서 "읽기 전용 루트에서 실제 쓰기가 errno 30으로 막히는지"는 확인하지 않습니다(`WRITE_TEST=NOT_RUN`). 필요하면 exec 범위를 정해 별도로 승인받습니다.
 - **실행 시점:** #46 배포 이후, 배포 receipt의 이미지 값(`TX_IMAGE`/`ENG_IMAGE`)으로 실행합니다. 실행 권한은 `fds-app` 읽기와 `get clusterversion`입니다(admission과 같은 현장 확인 항목).
 - **MOCK 시험:** `bash precheck/portability/tests/pg03-observe-mock.sh`(Linux). 입력 거부 9, 대상 불일치 7(마지막 namespace 확인의 다른 UID·빈 출력 실패·UID 출력 후 실패 포함), 수집 오류·판정 불가 16(Deployment NotFound, Pod 403, 현재 RS 중복, uid-range 이상, 잘못된 kind, 잘린 JSON, observedGeneration 지연, paused, pod-template-hash 불일치, 앱 컨테이너 없음, sidecar 공존, template만 추가 컨테이너, 미승인 live sidecar(UID 10001·`:latest`), live init 컨테이너, 앱 status 누락, status 2개), 판정 분기 17(31×4, 32×6, 33×2, 30×5 — Pod Ready 조건 False·종료 중 Pod·옛 replica 잔존 포함), 정상 1(이전 ReplicaSet Pod 제외), 기존 OUT_DIR 보존 1. 총 51건. 모든 경우 쓰기 명령 0건, 고정되지 않은 oc 호출 0건을 확인합니다.
