@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # infra-rosa#7 — NetworkPolicy·Egress·Hybrid Route TCP 시험 실행기 (ROSA 생성 후 키트)
 #
-# 사용: netpol-run.sh <render|precheck|stage-b|stage-a|cleanup>
+# 사용: netpol-run.sh <render|precheck|prepare|stage-b|stage-a|cleanup>
 #   단계마다 따로 실행한다. baseline#37 단계 C·D(이재환)와의 끼워 넣기 순서는 RUN-KIT.md.
 #
 #   render    로컬만(oc 호출 없음). 승인 입력을 approved-inputs.env로 고정하고 00~03·10~12를 렌더한다.
 #             kit·source·manifest·입력 해시를 bundle.txt에 묶고 그 해시(BUNDLE_SHA256)를 리뷰 승인값으로 쓴다.
 #   precheck  읽기 + server dry-run만(클러스터 변경 없음). 대상(API·Cluster ID·NS UID)을 target.env로 고정하고
 #             Worker IP가 WORKER_CIDR 안인지, OVN·router 라벨·DNS 포트, 대상 Namespace가 비어 있는지 본다.
-#   stage-b   시험 자원(10·11·12) 생성 → 정책 전(B) 측정. #37 단계 C·T3·db01 창 기록 링크가 있어야 시작한다.
-#   stage-a   플랫폼 정책 00→01→02→03 적용 → 정책 후(A) 측정 → Handoff 8·9.
-#   cleanup   stage-b가 OWNED로 기록한 시험 자원만 UID 대조 후 삭제. 00~03은 남기고 UID·spec을 확인한다.
+#   prepare   시험 자원(10·11·12) 생성 → Pod·노드 결속(binding.tsv) 수집·확인. TCP 시도 없음.
+#             #37 단계 C·T3·db01 창 기록 링크가 있어야 시작한다. 출력 BINDING_SHA256을 재환 님 분류표 고정에 쓴다.
+#   stage-b   BINDING_SHA256이 맞고 결속이 그대로일 때만 정책 전(B) 측정.
+#   stage-a   결속 재확인 → 플랫폼 정책 00→01→02→03 적용 → 정책 후(A) 측정 → Handoff 8·9.
+#   cleanup   prepare가 OWNED로 기록한 시험 자원만 UID 대조 후 삭제. 00~03은 남기고 UID·spec을 확인한다.
 #             완료 전까지 같은 RUN에서 cleanup-attempt-N으로 다시 시도할 수 있다.
 #
 # 하지 않는 것: 기존 NetworkPolicy·workload 삭제/수정, route·Relay·db01 조회/변경, 자동 재시도·자동 원복,
@@ -25,13 +27,15 @@
 #   클러스터 단계: APPROVED_BUNDLE_SHA256 (render 출력을 리뷰로 승인한 값)
 #     precheck만: CTX, API(https://host[:port]), EXPECTED_CLUSTER_ID, EXPECTED_NS_UID — 이후 단계는 target.env 사용
 #                 (이후 단계에 이 변수가 있으면 target.env와 같아야 함)
-#   stage-b: STAGE_C_REF, T3_REF, DB_WINDOW_REF — #37/#11 기록 댓글 URL(실행 시점 기록, 승인 입력 아님)
+#   prepare: STAGE_C_REF, T3_REF, DB_WINDOW_REF — #37/#11 기록 댓글 URL(실행 시점 기록, 승인 입력 아님)
+#   stage-b: BINDING_SHA256 (prepare 출력, 분류표 고정 확인값)
 #
 # 종료 코드:
 #   0  단계 성공          2  입력 오류(oc 호출 전)       10 대상 불일치(서버/Cluster ID/NS UID/target.env)
 #   11 조회 오류·필수 증적 수집 실패(EVIDENCE_INCOMPLETE)   20 precheck 조건 불충족
 #   21 bundle 불일치(kit·manifest·승인 입력 해시, 자리표시자)
-#   30 단계 순서·시각 조건 위반(이전 단계 없음·다른 bundle/대상, 이미 실행됨, Pod 수명 초과)
+#   22 Pod·노드 결속 확인 실패(UID·노드·노드 IP·image digest 불일치, 시험 노드에 시험 외 Pod) — TCP 시도 전 STOP
+#   30 단계 순서·시각 조건 위반(이전 단계 없음·다른 bundle/대상/결속, 이미 실행됨, Pod 수명 초과)
 #   40 B 기준 불성립 — 정책 시험으로 넘어가지 않음
 #   41 apply·Ready 실패(부분 생성·부분 정책은 created.tsv·policy-set.txt에 기록)
 #   42 A 정책 집합/00 spec이 계약과 다름
@@ -44,7 +48,7 @@ umask 077
 die() { local rc="$1"; shift; echo "STOP: $*" >&2; exit "$rc"; }
 
 PHASE="${1:-}"
-case "$PHASE" in render|precheck|stage-b|stage-a|cleanup) ;; *) die 2 "사용: $0 <render|precheck|stage-b|stage-a|cleanup>";; esac
+case "$PHASE" in render|precheck|prepare|stage-b|stage-a|cleanup) ;; *) die 2 "사용: $0 <render|precheck|prepare|stage-b|stage-a|cleanup>";; esac
 
 for c in sha256sum date awk sed grep sort cmp realpath mkdir timeout; do command -v "$c" >/dev/null || die 2 "명령 없음: $c"; done
 
@@ -214,10 +218,11 @@ validate_inputs 21
 MARK="BUNDLE=$BUNDLE_SHA"
 case "$PHASE" in
   precheck) : ;;
-  stage-b) [[ -f "$RUN_DIR/precheck.ok" ]] || die 30 "precheck PASS 기록 없음" ;;
+  prepare) [[ -f "$RUN_DIR/precheck.ok" ]] || die 30 "precheck PASS 기록 없음" ;;
+  stage-b) [[ -f "$RUN_DIR/prepare.ok" ]] || die 30 "prepare PASS 기록 없음(Pod·노드 결속 확인 전 TCP 시도 금지)" ;;
   stage-a) [[ -f "$RUN_DIR/stage-b.ok" ]] || die 30 "stage-b PASS 기록 없음(B 기준 없이 정책 적용 금지)" ;;
   cleanup)
-    [[ -f "$RUN_DIR/stage-b/created.tsv" ]] || die 30 "이 RUN의 stage-b 기록 없음(정리할 것 없음)"
+    [[ -f "$RUN_DIR/prepare/created.tsv" ]] || die 30 "이 RUN의 prepare 기록 없음(정리할 것 없음)"
     [[ ! -f "$RUN_DIR/cleanup.done" ]] || die 30 "이 RUN의 cleanup은 이미 완료됨: $(cat "$RUN_DIR/cleanup.done")" ;;
 esac
 
@@ -238,12 +243,22 @@ else
   [[ "$(kv "$RUN_DIR/target.env" BUNDLE)" == "$BUNDLE_SHA" ]] || die 30 "target.env가 다른 bundle에서 만들어짐"
   MARK="BUNDLE=$BUNDLE_SHA TARGET=$(sha_of "$RUN_DIR/target.env")"
   [[ "$(cat "$RUN_DIR/precheck.ok")" == "$MARK" ]] || die 30 "precheck.ok가 현재 bundle·대상과 다름"
-  [[ "$PHASE" != stage-a ]] || [[ "$(cat "$RUN_DIR/stage-b.ok")" == "$MARK" ]] || die 30 "stage-b.ok가 현재 bundle·대상과 다름"
+  if [[ "$PHASE" == stage-b || "$PHASE" == stage-a ]]; then
+    [[ -f "$RUN_DIR/prepare/binding.tsv" ]] || die 30 "prepare 결속 기록(binding.tsv) 없음"
+    BIND_SHA="$(sha_of "$RUN_DIR/prepare/binding.tsv")"
+    BIND_MARK="$MARK BINDING=$BIND_SHA"
+    [[ "$(cat "$RUN_DIR/prepare.ok")" == "$BIND_MARK" ]] || die 30 "prepare.ok가 현재 bundle·대상·결속과 다름"
+  fi
+  [[ "$PHASE" != stage-a ]] || [[ "$(cat "$RUN_DIR/stage-b.ok")" == "$BIND_MARK" ]] || die 30 "stage-b.ok가 현재 bundle·대상·결속과 다름"
 fi
 
-if [[ "$PHASE" == stage-b ]]; then
+if [[ "$PHASE" == prepare ]]; then
   STAGE_C_REF="${STAGE_C_REF:-}"; T3_REF="${T3_REF:-}"; DB_WINDOW_REF="${DB_WINDOW_REF:-}"
   for v in STAGE_C_REF T3_REF DB_WINDOW_REF; do [[ "${!v}" =~ $REF_RE ]] || die 30 "$v 필요(#37 단계 C·D 기록 댓글 URL) — 없으면 시작하지 않음"; done
+fi
+# 측정 전 확인점: 재환 님이 db01 분류표 ②(시험 Pod 노드 IP)를 고정한 결속 기록의 해시를 넣어야 TCP를 시작한다.
+if [[ "$PHASE" == stage-b ]]; then
+  [[ "${BINDING_SHA256:-}" == "$BIND_SHA" ]] || die 30 "BINDING_SHA256이 prepare 결속 기록과 다르거나 없음 — 분류표 고정 확인 전 TCP 시도 금지"
 fi
 
 open_phase
@@ -277,8 +292,10 @@ probe() { # stage id pod ip port
   rc=$?
   set -e
   code="$(sed -n 's/^NETPOL_RC=\([0-9]*\)$/\1/p' "$f.out" | tail -n 1)"
-  if [[ -z "$code" ]]; then
-    if (( rc == 124 )); then v=EXEC_TIMEOUT; else v=TOOL_ERROR; fi
+  # 바깥 exec 성공 여부를 먼저 본다. 표식이 있어도 바깥 실패면 판정에 쓰지 않는다(PR41 R5).
+  if (( rc == 124 )); then v=EXEC_TIMEOUT
+  elif (( rc != 0 )); then v=TOOL_ERROR
+  elif [[ -z "$code" ]]; then v=TOOL_ERROR
   elif (( code == 0 )); then v=CONNECTED
   elif (( code == 124 )); then v=TIMEOUT
   elif grep -qi 'connection refused' "$f.err"; then v=REFUSED
@@ -326,7 +343,7 @@ measure() { # stage
   probe "$s" N2 tcp-allowed "$DB_IP" "$N2_PORT"
   probe "$s" N3 tcp-allowed "${N3_TARGET%:*}" "${N3_TARGET##*:}"
   probe "$s" N4 tcp-allowed "${N4_TARGET%:*}" "${N4_TARGET##*:}"
-  pod_ip="$(cat "$RUN_DIR/stage-b/route-probe-ip.txt")"
+  pod_ip="$(cat "$RUN_DIR/prepare/route-probe-ip.txt")"
   probe "$s" N5 ingress-probe "$pod_ip" 8080
   route_check "$s"
 }
@@ -413,14 +430,64 @@ if [[ "$PHASE" == precheck ]]; then
   exit 0
 fi
 
+# ---- 시험 Pod·노드 결속 (측정 전 확인점, #37 rev4 6207238066 §1) ----
+# Pod UID·Pod IP·노드·노드 UID·예상 egress IP(노드 InternalIP, OVN SNAT)·imageID·라벨을 한 줄씩 남긴다.
+BIND_PODS=(tcp-allowed tcp-control ingress-probe route-probe)
+BIND_PROBLEMS=()
+collect_binding() { # out-file
+  local out="$1" tag p k uid ip node imgid labels nuid nip want
+  tag="$(basename "$out" .tsv)"; : >"$out"
+  for p in "${BIND_PODS[@]}"; do
+    k="$tag-$p"
+    run "$k" "${OC[@]}" -n "$NS" get pod "$p" -o 'jsonpath={.metadata.uid}{"\t"}{.status.podIP}{"\t"}{.spec.nodeName}{"\t"}{.status.containerStatuses[0].imageID}{"\t"}{.metadata.labels}'
+    [[ "$(rc_of "$k")" == 0 ]] || { BIND_PROBLEMS+=("$p:조회 실패"); continue; }
+    IFS=$'\t' read -r uid ip node imgid labels <"$PD/$k.out" || true
+    run "$k-node" "${OC[@]}" get node "$node" -o 'jsonpath={.metadata.uid}{"\t"}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{end}'
+    [[ "$(rc_of "$k-node")" == 0 ]] || { BIND_PROBLEMS+=("$p:노드 '$node' 조회 실패"); continue; }
+    IFS=$'\t' read -r nuid nip <"$PD/$k-node.out" || true
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$uid" "$ip" "$node" "$nuid" "$nip" "$imgid" "$labels" >>"$out"
+    grep -q "^pod/$p"$'\t'"$uid"$'\tOWNED' "$RUN_DIR/prepare/created.tsv" || BIND_PROBLEMS+=("$p:UID가 OWNED 기록과 다름")
+    [[ "$ip" =~ $IPV4_RE ]] || BIND_PROBLEMS+=("$p:Pod IP 없음")
+    grep -qx "$node"$'\t'"$nip" "$RUN_DIR/precheck/worker-ips.tsv" || BIND_PROBLEMS+=("$p:노드 $node/$nip가 precheck worker 목록에 없음(노드 교체·증설)")
+    if [[ "$p" == route-probe ]]; then want="${HTTP_IMAGE#*@}"; else want="${TEST_IMAGE#*@}"; fi
+    [[ "$imgid" == *"@$want" ]] || BIND_PROBLEMS+=("$p:imageID digest가 승인값과 다름(멀티아키텍처 index/child 차이 가능 — 사람 확인)")
+  done
+}
+# tcp-allowed·tcp-control 노드에 시험 외 비시스템 Pod가 있으면 db01에서 같은 노드 IP로 보일 수 있다(SNAT).
+check_node_pods() { # tag
+  local node ns name k
+  for node in $(awk -F'\t' '$1=="tcp-allowed"||$1=="tcp-control" {print $4}' "$RUN_DIR/prepare/binding.tsv" | sort -u); do
+    k="node-pods-$1-$node"
+    run "$k" "${OC[@]}" get pods -A --field-selector "spec.nodeName=$node" -o 'jsonpath={range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\n"}{end}'
+    [[ "$(rc_of "$k")" == 0 ]] || { BIND_PROBLEMS+=("노드 $node Pod 목록 조회 실패"); continue; }
+    while IFS=$'\t' read -r ns name; do
+      [[ -n "$ns" ]] || continue
+      [[ "$ns" =~ ^(openshift|kube)(-|$) ]] && continue
+      [[ "$ns" == "$NS" && " ${BIND_PODS[*]} " == *" $name "* ]] && continue
+      BIND_PROBLEMS+=("노드 $node에 시험 외 Pod $ns/$name")
+    done <"$PD/$k.out"
+  done
+}
+# stage-b·stage-a 첫 시도 전: 결속이 prepare 기록과 같고 시험 외 Pod가 없는지 다시 본다.
+verify_binding() { # tag
+  BIND_PROBLEMS=()
+  collect_binding "$PD/binding-now.tsv"
+  check_node_pods "$1"
+  cmp -s "$PD/binding-now.tsv" "$RUN_DIR/prepare/binding.tsv" || BIND_PROBLEMS+=("결속이 prepare 기록과 다름(binding-now.tsv)")
+  if (( ${#BIND_PROBLEMS[@]} )); then
+    printf '%s\n' "${BIND_PROBLEMS[@]}" >"$PD/binding-stop.txt"
+    die 22 "Pod·노드 결속 확인 실패 — 첫 TCP 시도 전 STOP: $(tr '\n' ';' <"$PD/binding-stop.txt")"
+  fi
+}
+
 # ======================================================================
-if [[ "$PHASE" == stage-b ]]; then
+if [[ "$PHASE" == prepare ]]; then
   { echo "STAGE_C_REF=$STAGE_C_REF"; echo "T3_REF=$T3_REF"; echo "DB_WINDOW_REF=$DB_WINDOW_REF"; } >>"$RUN_DIR/state.env"
   CREATED="$PD/created.tsv"; : >"$CREATED"
   run ns-inventory "${OC[@]}" -n "$NS" get networkpolicy,pod,deployment,statefulset,daemonset,replicaset,job,cronjob,service,route -o name
   [[ "$(rc_of ns-inventory)" == 0 ]] || die 11 "Namespace inventory 조회 실패"
   [[ ! -s "$PD/ns-inventory.out" ]] || die 20 "precheck 이후 대상 Namespace에 자원이 생김 — 변경 없이 STOP"
-  echo "#7 stage-b 시작 $(now_kst) — 재환 님께 카운터 기록 시작 요청 시각" | tee "$PD/notice.txt"
+  echo "#7 prepare 시작 $(now_kst) — 시험 자원 생성(TCP 시도 없음)" | tee "$PD/notice.txt"
   for n in 10 11 12; do
     apply_and_record "$n" "$CREATED" || die 41 "$n.yaml 적용·기록 불완전(created.tsv 확인). 자동 원복 없음 — cleanup은 OWNED만 정리, UNCONFIRMED는 복구 절차"
   done
@@ -429,6 +496,25 @@ if [[ "$PHASE" == stage-b ]]; then
   run route-probe-ip "${OC[@]}" -n "$NS" get pod route-probe -o 'jsonpath={.status.podIP}'
   [[ "$(rc_of route-probe-ip)" == 0 && "$(out_of route-probe-ip)" =~ $IPV4_RE ]] || die 11 "route-probe Pod IP 조회 실패"
   out_of route-probe-ip >"$PD/route-probe-ip.txt"
+  collect_binding "$PD/binding.tsv"
+  check_node_pods prepare
+  if (( ${#BIND_PROBLEMS[@]} )); then
+    printf '%s\n' "${BIND_PROBLEMS[@]}" >"$PD/binding-stop.txt"
+    die 22 "Pod·노드 결속 확인 실패 — TCP 시도 전 STOP: $(tr '\n' ';' <"$PD/binding-stop.txt") (cleanup으로 시험 자원 정리)"
+  fi
+  chmod 400 "$PD/binding.tsv"
+  BSHA="$(sha_of "$PD/binding.tsv")"
+  printf '%s BINDING=%s' "$MARK" "$BSHA" >"$RUN_DIR/prepare.ok"
+  echo "PREPARE_OK BINDING_SHA256=$BSHA"
+  echo "재환 님께 전달: $PD/binding.tsv (db01 분류표 ② = tcp-allowed·tcp-control 노드 IP(6번째 칸))"
+  echo "분류표 고정 확인 뒤: BINDING_SHA256=$BSHA bash $0 stage-b"
+  exit 0
+fi
+
+# ======================================================================
+if [[ "$PHASE" == stage-b ]]; then
+  verify_binding stage-b
+  echo "#7 stage-b 시작 $(now_kst) — 재환 님께 카운터 기록 시작 요청 시각" | tee "$PD/notice.txt"
   measure B
   for id in P1 N1 N5; do [[ "$(verdict "$id")" == CONNECTED ]] || FAILS+=("$id:$(verdict "$id")(기대 CONNECTED)"); done
   [[ "$REG_MODE" != include || "$(verdict P2)" == CONNECTED ]] || FAILS+=("P2:$(verdict P2)(기대 CONNECTED)")
@@ -438,7 +524,7 @@ if [[ "$PHASE" == stage-b ]]; then
     printf '%s\n' "${FAILS[@]}" >"$PD/stop.txt"
     die 40 "B 기준 불성립 — 정책 시험으로 넘어가지 않음: $(tr '\n' ';' <"$PD/stop.txt") (경로·#37 T3 상태 확인, cleanup으로 시험 자원 정리)"
   fi
-  printf '%s' "$MARK" >"$RUN_DIR/stage-b.ok"
+  printf '%s' "$BIND_MARK" >"$RUN_DIR/stage-b.ok"
   echo "STAGE_B_OK — 이어서 stage-a (시험 Pod 수명 안에)"
   exit 0
 fi
@@ -449,10 +535,11 @@ if [[ "$PHASE" == stage-a ]]; then
     run "age-$p" "${OC[@]}" -n "$NS" get pod "$p" -o 'jsonpath={.metadata.uid} {.metadata.creationTimestamp}'
     [[ "$(rc_of "age-$p")" == 0 ]] || die 11 "$p 조회 실패"
     read -r uid ts <"$PD/age-$p.out" || true
-    grep -q "^pod/$p"$'\t'"$uid"$'\tOWNED' "$RUN_DIR/stage-b/created.tsv" || die 30 "$p UID가 stage-b OWNED 기록과 다름(재생성 혼입)"
+    grep -q "^pod/$p"$'\t'"$uid"$'\tOWNED' "$RUN_DIR/prepare/created.tsv" || die 30 "$p UID가 prepare OWNED 기록과 다름(재생성 혼입)"
     age=$(( ( $(date -u +%s) - $(date -u -d "$ts" +%s) ) / 60 ))
     (( age < POD_MAX_AGE_MIN )) || die 30 "$p 생성 후 ${age}분 — 수명 한도 ${POD_MAX_AGE_MIN}분 이상(새 RUN으로 다시)"
   done
+  verify_binding stage-a
   echo "#7 stage-a 정책 적용 시작 $(now_kst) — 00 적용~03 적용 사이 DB 경로가 잠깐 막힘(의도)" | tee "$PD/notice.txt"
   NPJ="$PD/np-applied.tsv"; : >"$NPJ"
   set_policy() { printf 'POLICY_SET=%s %s\n' "$1" "$(now_utc)" >"$RUN_DIR/policy-set.txt"; journal POLICY_SET "$1"; }
@@ -546,7 +633,7 @@ if [[ "$PHASE" == cleanup ]]; then
     if [[ "$(out_of "cur-$k")" != "$uid" ]]; then HOLD+=("$r:UID 불일치"); echo "$r HOLD(UID 불일치 $(out_of "cur-$k"))" >>"$PD/cleanup.txt"; continue; fi
     run "del-$k" "${OC[@]}" -n "$NS" delete "$r" --wait=true
     if [[ "$(rc_of "del-$k")" == 0 ]]; then echo "$r DELETED $uid" >>"$PD/cleanup.txt"; else HOLD+=("$r:삭제 실패"); echo "$r HOLD(삭제 실패)" >>"$PD/cleanup.txt"; fi
-  done <"$RUN_DIR/stage-b/created.tsv"
+  done <"$RUN_DIR/prepare/created.tsv"
   # 플랫폼 정책: 지우지 않는다. 적용 기록(APPLIED)과 UID·spec이 같은지, 미확인 정책이 있는지 본다.
   expected_left="$PD/expected-left.txt"; : >"$expected_left"
   if [[ -f "$RUN_DIR/stage-a/np-applied.tsv" ]]; then

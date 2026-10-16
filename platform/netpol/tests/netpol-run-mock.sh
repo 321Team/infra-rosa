@@ -73,6 +73,28 @@ case "$a" in
     done
     exit $rc;;
   "$P wait "*) exit 0;;
+  "$P get pod "*" -o jsonpath={.metadata.uid}{\"\\t\"}{.status.podIP}"*)
+    r="${a#"$P get pod "}"; r="${r%% *}"
+    D="$(printf 'a%.0s' {1..64})"
+    case "$r" in
+      tcp-allowed) node=n1; ip=10.128.2.11; img="registry.invalid/ubi9/ubi-minimal@sha256:$D";;
+      tcp-control) node=n2; ip=10.129.0.12; img="registry.invalid/ubi9/ubi-minimal@sha256:$D"; [[ -f "$STATE/moved" ]] && node=n3;;
+      ingress-probe) node=n1; ip=10.128.2.14; img="registry.invalid/ubi9/ubi-minimal@sha256:$D";;
+      route-probe) node=n3; ip=10.128.2.15; img="registry.invalid/ubi9/httpd-24@sha256:$D";;
+    esac
+    [[ "$SCENARIO" == digest_diff && "$r" == tcp-allowed ]] && img="registry.invalid/ubi9/ubi-minimal@sha256:$(printf 'b%.0s' {1..64})"
+    printf '%s\t%s\t%s\t%s\t{"app":"%s"}' "$(uid_for "pod/$r")" "$ip" "$node" "$img" "$r"; exit 0;;
+  "get node "*" -o jsonpath="*)
+    n="${a#get node }"; n="${n%% *}"
+    case "$n" in n1) ip=10.20.10.11;; n2) ip=10.20.10.12;; n3) ip=10.20.10.13;; *) echo "NotFound node $n" >&2; exit 1;; esac
+    printf 'node-uid-%s\t%s' "$n" "$ip"; exit 0;;
+  "get pods -A --field-selector spec.nodeName="*)
+    n="${a#get pods -A --field-selector spec.nodeName=}"; n="${n%% *}"
+    printf 'openshift-dns\tdns-default-%s\nopenshift-ovn-kubernetes\tovnkube-node-%s\n' "$n" "$n"
+    [[ "$n" == n1 ]] && printf 'fds-app\ttcp-allowed\nfds-app\tingress-probe\n'
+    [[ "$n" == n2 ]] && printf 'fds-app\ttcp-control\n'
+    { [[ "$SCENARIO" == app_pod_on_node ]] || [[ -f "$STATE/apppod" ]]; } && [[ "$n" == n2 ]] && printf 'payments\tapi-7d9f\n'
+    exit 0;;
   "$P get pod route-probe -o jsonpath={.status.podIP}") printf '10.128.2.15'; exit 0;;
   "$P get pod "*" -o jsonpath={.metadata.uid} {.metadata.creationTimestamp}")
     r="${a#"$P get pod "}"; r="pod/${r%% *}"
@@ -116,6 +138,9 @@ case "$a" in
     printf '%s %s %s\n' "$pod" "$ip" "$port" >>"$STATE/exec-targets"
     [[ "$SCENARIO" == exec_hang && "$pod" == tcp-control && -f "$STATE/obj-networkpolicy-fds-platform-default-deny" ]] && { sleep 10; exit 0; }
     pol=0; [[ -f "$STATE/obj-networkpolicy-fds-platform-default-deny" ]] && pol=1
+    # R5: 원격 표식은 찍혔지만 바깥 exec가 실패
+    [[ "$SCENARIO" == exec_rc_marker && "$pod" == tcp-control && $pol == 1 ]] && { echo "NETPOL_RC=124"; echo 'error: stream closed' >&2; exit 42; }
+    [[ "$SCENARIO" == exec_rc_marker_b && "$pod" == tcp-allowed && "$ip:$port" == 10.1.93.55:5432 && $pol == 0 ]] && { echo "NETPOL_RC=0"; echo 'error: stream closed' >&2; exit 42; }
     if [[ "$ip:$port" == 10.1.93.55:22 ]] && { [[ "$SCENARIO" == b_n2_toolerror && $pol == 0 ]] || [[ "$SCENARIO" == a_n2_toolerror && $pol == 1 ]]; }; then
       echo 'error: unable to upgrade connection: container not found' >&2; exit 1
     fi
@@ -163,7 +188,7 @@ assert() { # name condition...
 }
 new_case() { # id [scenario]
   export SCENARIO="${2:-normal}" STATE="$T/state.$1" CALLLOG="$T/calls.$1" RUN_DIR="$T/run.$1"
-  unset UID_SHIFT NP_CHANGED APPROVED_BUNDLE_SHA256 STAGE_C_REF T3_REF DB_WINDOW_REF NETPOL_EXEC_TIMEOUT_S CTX API EXPECTED_CLUSTER_ID EXPECTED_NS_UID
+  unset UID_SHIFT NP_CHANGED APPROVED_BUNDLE_SHA256 BINDING_SHA256 STAGE_C_REF T3_REF DB_WINDOW_REF NETPOL_EXEC_TIMEOUT_S CTX API EXPECTED_CLUSTER_ID EXPECTED_NS_UID
   mkdir -p "$STATE"; : >"$CALLLOG"
 }
 do_render() {
@@ -174,7 +199,9 @@ do_render() {
 approve() { export APPROVED_BUNDLE_SHA256="$(sha256sum "$RUN_DIR/bundle.txt" | cut -d' ' -f1)"; }
 precheck() { env "${TARGET_ENV[@]}" bash "$SCRIPT" precheck; }
 refs() { export STAGE_C_REF="$REF" T3_REF="$REF" DB_WINDOW_REF="$REF"; }
-to_stage_b() { do_render >/dev/null; approve; precheck >/dev/null; refs; }
+to_prepare() { do_render >/dev/null; approve; precheck >/dev/null; refs; }
+bind() { export BINDING_SHA256="$(sha256sum "$RUN_DIR/prepare/binding.tsv" | cut -d" " -f1)"; }
+to_stage_b() { to_prepare; bash "$SCRIPT" prepare >/dev/null; bind; }
 to_stage_a() { to_stage_b; bash "$SCRIPT" stage-b >/dev/null; }
 calls_writes() { grep -E -e ' (apply -f|delete|exec|create|patch|label) ' "$CALLLOG" | grep -v 'apply --dry-run=server' | grep -q .; }
 export -f calls_writes
@@ -229,7 +256,7 @@ assert "precheck: 그때 oc 호출 0" bash -c '! [[ -s "$CALLLOG" ]]'
 new_case k1; to_stage_b; echo 'DB_IP=203.0.113.77' >>"$RUN_DIR/state.env"
 check "결속: state.env에 DB_IP를 덧붙여도 정상 진행" 0 bash "$SCRIPT" stage-b
 assert "결속: probe는 승인 입력의 DB만 호출(203.0.113.77 호출 0)" bash -c '! grep -q 203.0.113.77 "$STATE/exec-targets" && grep -q "10.1.93.55 5432" "$STATE/exec-targets"'
-new_case k2; to_stage_b
+new_case k2; to_stage_b; : >"$CALLLOG"
 check "결속: stage-b에 다른 Cluster ID 기대값 → STOP" 10 env EXPECTED_CLUSTER_ID=99999999-0000-0000-0000-000000000000 bash "$SCRIPT" stage-b
 assert "결속: 그때 쓰기 0" bash -c '! calls_writes'
 new_case k3; to_stage_b; cp "$SCRIPT" "$T/kit-copy.sh"; echo '# changed' >>"$T/kit-copy.sh"
@@ -237,32 +264,57 @@ check "결속: kit가 바뀌면 STOP" 21 bash "$T/kit-copy.sh" stage-b
 new_case k4; to_stage_b; chmod u+w "$RUN_DIR/precheck.ok"; printf 'BUNDLE=x TARGET=y' >"$RUN_DIR/precheck.ok"
 check "결속: precheck.ok가 다른 bundle·대상 → STOP" 30 bash "$SCRIPT" stage-b
 
-# ---- stage-b ----
+# ---- prepare (측정 전 확인점) ----
 new_case b1; do_render >/dev/null; approve; refs
-check "stage-b: precheck 없이 거부" 30 bash "$SCRIPT" stage-b
+check "prepare: precheck 없이 거부" 30 bash "$SCRIPT" prepare
+check "stage-b: prepare 없이 거부" 30 bash "$SCRIPT" stage-b
 new_case b2; do_render >/dev/null; approve; precheck >/dev/null; : >"$CALLLOG"
-check "stage-b: #37 단계 C·T3·db01 기록 링크 없음 → 시작 안 함" 30 bash "$SCRIPT" stage-b
-assert "stage-b: 링크 없을 때 oc 호출 0" bash -c '! [[ -s "$CALLLOG" ]]'
+check "prepare: #37 단계 C·T3·db01 기록 링크 없음 → 시작 안 함" 30 bash "$SCRIPT" prepare
+assert "prepare: 링크 없을 때 oc 호출 0" bash -c '! [[ -s "$CALLLOG" ]]'
+new_case b3; to_prepare
+check "prepare: 정상" 0 bash "$SCRIPT" prepare
+assert "prepare: TCP 시도 0" bash -c '! [[ -s "$STATE/exec-targets" ]]'
+assert "prepare: 결속 4행(Pod·UID·Pod IP·노드·노드 UID·egress IP·imageID)" bash -c '[[ $(wc -l <"$RUN_DIR/prepare/binding.tsv") == 4 ]] && grep -q "^tcp-allowed	.*	n1	node-uid-n1	10.20.10.11	" "$RUN_DIR/prepare/binding.tsv"'
+check "stage-b: BINDING_SHA256 없음 → TCP 전 거부" 30 bash "$SCRIPT" stage-b
+check "stage-b: BINDING_SHA256 다름 → 거부" 30 env BINDING_SHA256="$D64" bash "$SCRIPT" stage-b
+assert "stage-b: 그때 TCP 시도 0" bash -c '! [[ -s "$STATE/exec-targets" ]]'
+new_case b7 digest_diff; to_prepare
+check "prepare: imageID digest가 승인값과 다름 → STOP" 22 bash "$SCRIPT" prepare
+new_case b8 app_pod_on_node; to_prepare
+check "prepare: 시험 노드에 시험 외 앱 Pod → STOP" 22 bash "$SCRIPT" prepare
+assert "prepare: 그 Pod 이름 기록" bash -c 'grep -q "payments/api-7d9f" "$RUN_DIR/prepare/binding-stop.txt"'
+check "cleanup: 결속 STOP 뒤 시험 자원 정리" 0 bash "$SCRIPT" cleanup
+new_case b9; to_stage_b; touch "$STATE/moved"
+check "stage-b: prepare 뒤 tcp-control 노드 이동 → 첫 TCP 전 STOP" 22 bash "$SCRIPT" stage-b
+assert "stage-b: 그때 TCP 시도 0" bash -c '! [[ -s "$STATE/exec-targets" ]]'
+new_case b10; to_stage_b; touch "$STATE/apppod"
+check "stage-b: prepare 뒤 시험 노드에 앱 Pod 등장 → 첫 TCP 전 STOP" 22 bash "$SCRIPT" stage-b
+new_case b5 apply_fail_11; to_prepare
+check "prepare: 11 일부만 생성 → STOP" 41 bash "$SCRIPT" prepare
+assert "prepare: 10의 2개·11의 첫 객체는 OWNED로 즉시 기록" bash -c '[[ $(grep -c "	OWNED	" "$RUN_DIR/prepare/created.tsv") == 3 ]] && grep -q "^pod/route-probe	.*	OWNED	11" "$RUN_DIR/prepare/created.tsv"'
+check "cleanup: 부분 생성 RUN도 OWNED 정리 가능" 0 bash "$SCRIPT" cleanup
+assert "cleanup: 만든 3개 삭제, 남은 자원 0" bash -c '[[ $(grep -c " delete " "$CALLLOG") == 3 ]] && ! ls "$STATE"/obj-* >/dev/null 2>&1'
+new_case b6 uid_fail; to_prepare
+check "prepare: UID 조회 실패 → 미확인 기록 후 STOP" 41 bash "$SCRIPT" prepare
+assert "prepare: tcp-control은 UNCONFIRMED" bash -c 'grep -q "^pod/tcp-control	-	UNCONFIRMED" "$RUN_DIR/prepare/created.tsv"'
+
+# ---- stage-b ----
 new_case b4 b_p1_timeout; to_stage_b
 check "stage-b: B에서 P1 TIMEOUT → 기준 불성립" 40 bash "$SCRIPT" stage-b
 assert "stage-b: 기준 불성립 시 플랫폼 00 미적용" bash -c '! [[ -f "$STATE/obj-networkpolicy-fds-platform-default-deny" ]]'
 check "stage-a: B 실패 RUN에서 거부" 30 bash "$SCRIPT" stage-a
 check "cleanup: B 실패 뒤 시험 자원 정리(POLICY_SET=NONE)" 0 bash "$SCRIPT" cleanup
-new_case b5 apply_fail_11; to_stage_b
-check "stage-b: 11 일부만 생성 → STOP" 41 bash "$SCRIPT" stage-b
-assert "stage-b: 10의 2개·11의 첫 객체는 OWNED로 즉시 기록" bash -c '[[ $(grep -c "	OWNED	" "$RUN_DIR/stage-b/created.tsv") == 3 ]] && grep -q "^pod/route-probe	.*	OWNED	11" "$RUN_DIR/stage-b/created.tsv"'
-check "cleanup: 부분 생성 RUN도 OWNED 정리 가능" 0 bash "$SCRIPT" cleanup
-assert "cleanup: 만든 3개 삭제, 남은 자원 0" bash -c '[[ $(grep -c " delete " "$CALLLOG") == 3 ]] && ! ls "$STATE"/obj-* >/dev/null 2>&1'
-new_case b6 uid_fail; to_stage_b
-check "stage-b: UID 조회 실패 → 미확인 기록 후 STOP" 41 bash "$SCRIPT" stage-b
-assert "stage-b: tcp-control은 UNCONFIRMED" bash -c 'grep -q "^pod/tcp-control	-	UNCONFIRMED" "$RUN_DIR/stage-b/created.tsv"'
+new_case b11 exec_rc_marker_b; to_stage_b
+check "stage-b: 표식 NETPOL_RC=0이어도 바깥 exec rc≠0 → P1 TOOL_ERROR, 기준 불성립(R5)" 40 bash "$SCRIPT" stage-b
+assert "stage-b: P1은 TOOL_ERROR" bash -c 'grep -q "^B	P1	.*	exec=42,tcp=0	TOOL_ERROR$" "$RUN_DIR/stage-b/results.tsv"'
+new_case b6c uid_fail; to_prepare; bash "$SCRIPT" prepare >/dev/null 2>&1 || true
 check "cleanup: UNCONFIRMED 있으면 HOLD" 60 bash "$SCRIPT" cleanup
 assert "cleanup: UNCONFIRMED 자원은 삭제 안 함" bash -c '! grep -q " delete pod/tcp-control" "$CALLLOG"'
 
 # ---- 전체 흐름 ----
 new_case f1; to_stage_b
 check "stage-b: 정상" 0 bash "$SCRIPT" stage-b
-assert "stage-b: created.tsv 7개 OWNED" bash -c '[[ $(grep -c "	OWNED	" "$RUN_DIR/stage-b/created.tsv") == 7 ]]'
+assert "prepare: created.tsv 7개 OWNED" bash -c '[[ $(grep -c "	OWNED	" "$RUN_DIR/prepare/created.tsv") == 7 ]]'
 assert "stage-b: B단계 R1 기록" bash -c 'grep -q "^B	R1	" "$RUN_DIR/stage-b/results.tsv"'
 check "stage-b: 같은 RUN 재실행 거부" 30 bash "$SCRIPT" stage-b
 check "stage-a: 정상" 0 bash "$SCRIPT" stage-a
@@ -293,6 +345,12 @@ assert "stage-a: 그 N2는 INCONCLUSIVE" bash -c 'grep -q "^N2	TIMEOUT	TOOL_ERRO
 new_case a13 b_n2_toolerror; to_stage_a
 check "stage-a: B=TOOL_ERROR·A=TIMEOUT(N2) → B 기준 미확인, 판정 불가" 51 bash "$SCRIPT" stage-a
 assert "stage-a: 그 N2는 INCONCLUSIVE" bash -c 'grep -q "^N2	TOOL_ERROR	TIMEOUT	INCONCLUSIVE$" "$RUN_DIR/stage-a/np-effect.tsv"'
+new_case a14 exec_rc_marker; to_stage_a
+check "stage-a: 표식 NETPOL_RC=124여도 바깥 exec rc≠0 → TOOL_ERROR·판정 불가(R5)" 51 bash "$SCRIPT" stage-a
+assert "stage-a: N1 TOOL_ERROR, NP_EFFECT 아님, HYBRID_ROUTE=BLOCKED" bash -c 'grep -q "^A	N1	.*	exec=42,tcp=124	TOOL_ERROR$" "$RUN_DIR/stage-a/results.tsv" && grep -q "^N1	CONNECTED	TOOL_ERROR	INCONCLUSIVE$" "$RUN_DIR/stage-a/np-effect.tsv" && grep -q "^HYBRID_ROUTE=BLOCKED" "$RUN_DIR/stage-a/handoff.txt"'
+new_case a15; to_stage_a; touch "$STATE/moved"
+check "stage-a: stage-b 뒤 노드 이동 → 정책 적용 전 STOP" 22 bash "$SCRIPT" stage-a
+assert "stage-a: 그때 플랫폼 00 미적용" bash -c '! [[ -f "$STATE/obj-networkpolicy-fds-platform-default-deny" ]]'
 new_case a8 exec_hang; to_stage_a; export NETPOL_EXEC_TIMEOUT_S=2
 check "stage-a: oc exec 바깥 시간 초과 → TCP TIMEOUT과 구분(판정 불가)" 51 bash "$SCRIPT" stage-a
 assert "stage-a: N1은 EXEC_TIMEOUT으로 기록" bash -c 'grep -q "^A	N1	.*	EXEC_TIMEOUT$" "$RUN_DIR/stage-a/results.tsv"'

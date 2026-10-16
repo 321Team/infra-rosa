@@ -30,23 +30,32 @@ TEST-PLAN C1은 `10.20.0.0/16`을 기준으로 했지만, 이 키트는 단계 C
 | 2 | #5 | `fds-app` 생성·소유권·**Namespace UID 확인** | — | NS UID |
 | 3 | 하영 | 읽기 확인 + server dry-run, 대상 고정(`target.env`), 창 시작 출발지 목록(`worker-ips.tsv`) | `precheck` | `PRECHECK_OK` |
 | 4 | 재환 / 하영(#35) | **단계 C**: 재환 터널 수립·회차 조율, 하영 #35 Terraform route·SG Plan/Apply(`private_a → Relay ENI`), 승인된 db01 runtime 사전 창 `pre-apply` | — | 단계 C·db01 창 기록(`STAGE_C_REF`, `DB_WINDOW_REF`) |
-| 5 | 재환 | 단계 D **T3 첫 PASS** → 안정 구간을 하영에게 인계 | — | T3 기록(`T3_REF`) |
-| **6** | **하영** | **시험 자원 생성 → 정책 전(B) 측정** (재환 전후 카운터 관측) | `stage-b` | `STAGE_B_OK` |
-| **7** | **하영** | **00→01→02→03 적용 → 정책 후(A) 측정 → Handoff 8·9** | `stage-a` | `STAGE_A_PASS`, 재환 님께 "#7 종료" 통보 |
-| 8 | 하영 | 시험 자원 정리(00~03 유지) | `cleanup` | `CLEANUP_OK` |
-| 9 | 재환 | T6 → T3(복구 후). **T7·T9·T11은 다음 창**(db01 창 시간, #37 Q1). T8은 원래 별도 창 | — | — |
-| 10 | 재환 / 권욱 원복 통제 | T12, 임시 인스턴스 삭제, db01 `pre-rollback`·readback | — | #7 6~8번 확인 뒤 |
+| 5 | 재환 | 단계 D **T3 첫 PASS**(최대 3회) → 안정 구간을 하영에게 인계 | — | T3 기록(`T3_REF`) |
+| **6** | **하영** | **시험 자원 생성 → Pod·노드 결속 수집·확인(TCP 없음)** | `prepare` | `PREPARE_OK`, `BINDING_SHA256` |
+| 6a | 재환 | `binding.tsv`의 tcp-allowed·tcp-control 노드 IP로 db01 분류표 ②를 고정 | — | 분류표 고정 → 하영에게 확인 |
+| **7** | **하영** | 결속 재확인 → **정책 전(B) 측정** (재환 전후 카운터·db01 관측) | `stage-b` | `STAGE_B_OK` |
+| **8** | **하영** | 결속 재확인 → **00→01→02→03 적용 → 정책 후(A) 측정 → Handoff 8·9** | `stage-a` | `STAGE_A_PASS`, 재환 님께 "#7 종료" 통보 |
+| 9 | 하영 | 시험 자원 정리(00~03 유지) | `cleanup` | `CLEANUP_OK` |
+| — | 판단점 | **W1+65분까지 #7(6~9)이 끝나지 않았으면 T6·T3-R은 이번 창에서 하지 않음** | — | — |
+| 10 | 재환 | T6 → T3-R(복구 후). **T7·T9·T11은 다음 창**(db01 창 시간, #37 Q1). T8은 원래 별도 창 | — | — |
+| 11 | 재환 / 권욱 원복 통제 | W3 `check` → W4 db01 `pre-rollback`(시작 ≤ W1+100, 완료 ≤ W1+120) | — | **#7 cleanup 완료를 기다리지 않음**(시간 상한 우선) |
+| 12 | 하영 → 재환 → 권욱 | W4 뒤: #7 cleanup 확인 → P9 probe Destroy·P8 route OFF(하영) → V9 vpn-gw01 → Relay rollback(재환) → 보충 정책 분리(권욱) | — | — |
 
-- 6~7번을 T3 직후에 두는 이유: T6(SA 내림)·T7(재시작)·T8(재부팅) 중에는 터널이 흔들려 #7 B/A 판정이 섞인다. 이 구간에 장애 유발 작업을 겹치지 않는다.
+- 기준: [#37 rev4 6207238066](https://github.com/321Team/fds-project-baseline/issues/37#issuecomment-6207238066) §4. 6~9번 예상 누계는 #7 B +35, A +55, 정리 +60(W1=0)이며 확정 작업창이 아니다.
+- 창이 길면 두 창으로 나눈다: (가) T3 + #7, (나) T3 + T6 + T3-R + T7·T9·T11. 창마다 새 RUN(VPN·DB)이고 #7도 새 `RUN_DIR`이다.
+- 6~8번을 T3 직후에 두는 이유: T6(SA 내림)·T7(재시작)·T8(재부팅) 중에는 터널이 흔들려 #7 B/A 판정이 섞인다. 이 구간에 장애 유발 작업을 겹치지 않는다.
+- **측정 전 확인점(6·6a):** db01에서 시험 Pod 트래픽은 노드 IP로 보인다(OVN SNAT). 그래서 첫 TCP 전에 실제 Pod·노드·egress IP·image digest와 그 노드의 시험 외 Pod 부재를 확인하고, 재환 님 분류표 ②가 그 노드 IP로 고정된 뒤에만 측정한다. `stage-b`는 `BINDING_SHA256`(=고정에 쓴 `binding.tsv` 해시)이 맞을 때만 시작하며, stage-b·stage-a 첫 시도 전에 결속이 그대로인지 다시 본다(노드 교체·Pod 이동·앱 Pod 등장 → rc 22, TCP 없이 STOP).
+- #37 §1 중단 조건(③ 출발지·ENI 목록 변화·귀속 안 되는 SYN·관측 공백)이 생기면 재환 님 통보에 따라 진행 중인 #7 단계를 그 상태로 멈추고 `RUN_DIR`을 보존한다(실행기 자동 재시도·원복 없음).
 - 터널·Route 상시 유지 여부는 **이권욱 결정 대기**(#37 6205733242 "먼저 정할 것 1"). 결정 전에는 창 단위로 진행하며, 어느 쪽이든 6~7번은 같은 창의 T3 직후에 둔다. 이 순서가 route·SG 쓰기 권한을 재환에게 넘기거나 상시 유지·DB 창을 새로 승인하는 것은 아니다.
 - 시험 Namespace: `fds-app`에서 **앱 NetworkPolicy·workload를 넣기 전에** B→A를 한다([#7 6206079534](https://github.com/321Team/infra-rosa/issues/7#issuecomment-6206079534) Q6 1안). 기존 자원을 지워 시험 조건을 만들지 않는다. 이미 자원이 있으면 precheck·stage-b가 STOP하며, 격리 Namespace 안은 별도 검토다.
-- **9번 이후(`pre-rollback` 뒤)로는 미루지 않는다** — 그때는 P1·N1을 `PENDING(#37 창 없음)`으로 둔다.
-- db01 출발지 조건: 창 시작 때 `/24` 안 출발지 목록(probe 1 + precheck `worker-ips.tsv`의 worker IP)을 고정하고, 목록 밖 출발지가 db01에 보이면 중단한다([#37 6206092897](https://github.com/321Team/fds-project-baseline/issues/37#issuecomment-6206092897), 최종 확정은 이권욱).
+- **W4(`pre-rollback`) 뒤로는 미루지 않는다** — 그때는 P1·N1을 `PENDING(#37 창 없음)`으로 둔다.
+- db01 출발지 분류: ① probe primary IP(상시), ② `tcp-allowed`·`tcp-control` 노드 IP(#7 stage-b·stage-a 시작~끝 안에서만), ③ 그 밖 worker·시스템 ENI(중단 사유). 시도 시각(`results.tsv`)과 맞지 않는 SYN도 중단 사유다([#37 rev4](https://github.com/321Team/fds-project-baseline/issues/37#issuecomment-6207238066) §1, [6206092897](https://github.com/321Team/fds-project-baseline/issues/37#issuecomment-6206092897)·[6207220975](https://github.com/321Team/fds-project-baseline/issues/37#issuecomment-6207220975), 최종 확정은 이권욱).
+- #7이 db01에 닿는 시도는 단계마다 P1(5432)·N1(5432)·N2(`N2_PORT`) 각 1회, 정책 전후 합계 6회다. 자동 재시도는 없다.
 
 ### 작업창 시간
 - 시작·종료 시각과 DB 창 연장은 **미배정**이다. 작업창은 이미지 pull·스케줄링·B/A 측정·카운터 수집·실패 진단·cleanup·db01 원복/readback을 모두 포함해 보수적으로 잡는다.
 - `POD_MAX_AGE_MIN`(기본 50분)은 시험 Pod 수명(`sleep 3600`)과 A 측정이 섞이지 않게 하는 **보호 장치일 뿐 작업창 상한이 아니다.**
-- Pod 안 TCP 시도는 5초 상한, 바깥 `oc` 명령은 `NETPOL_EXEC_TIMEOUT_S`(기본 60초) 상한이다. 바깥 상한 초과는 `EXEC_TIMEOUT`(판정 불가)으로 남고 원격 TCP `TIMEOUT`(정상 차단)과 섞이지 않는다.
+- Pod 안 TCP 시도는 5초 상한, 바깥 `oc` 명령은 `NETPOL_EXEC_TIMEOUT_S`(기본 60초) 상한이다. 바깥 상한 초과는 `EXEC_TIMEOUT`(판정 불가)으로 남고 원격 TCP `TIMEOUT`(정상 차단)과 섞이지 않는다. 바깥 `oc exec`가 실패하면(rc ≠ 0) Pod 안 표식이 찍혔어도 `TOOL_ERROR`로 판정에 쓰지 않는다(PR41 R5).
 
 ## 3. 입력값과 출처
 
@@ -68,14 +77,15 @@ TEST-PLAN C1은 `10.20.0.0/16`을 기준으로 했지만, 이 키트는 단계 C
 
 ### 대상 고정 (precheck에서 `target.env`로 고정)
 - `CTX`, `API`, `EXPECTED_CLUSTER_ID`, `EXPECTED_NS_UID`는 **precheck에만** 넣는다(#4 Inventory, #5 NS UID). 이후 단계는 `target.env`를 쓰고, 환경변수가 있으면 같아야 한다(다르면 rc 10).
-- `precheck.ok`·`stage-b.ok`에는 bundle 해시와 `target.env` 해시가 들어 있어 이전 단계와 같은 대상·같은 bundle인지 확인한다.
+- `precheck.ok`에는 bundle·`target.env` 해시, `prepare.ok`·`stage-b.ok`에는 여기에 `binding.tsv` 해시까지 들어 있어 이전 단계와 같은 대상·같은 bundle·같은 결속인지 확인한다.
 
-### 실행 시점 기록 (stage-b)
-- `STAGE_C_REF`, `T3_REF`, `DB_WINDOW_REF` — #37/#11 재환 님 기록 댓글 URL. 없으면 oc 호출 전 거부(rc 30).
+### 실행 시점 기록
+- prepare: `STAGE_C_REF`, `T3_REF`, `DB_WINDOW_REF` — #37/#11 재환 님 기록 댓글 URL. 없으면 oc 호출 전 거부(rc 30).
+- stage-b: `BINDING_SHA256` — prepare 출력값. 재환 님 분류표 ② 고정 확인 뒤 넣는다. 없거나 다르면 oc 호출 전 거부(rc 30).
 
 ## 4. 실행 (실행 위치: #5 bootstrap/관리자 접속 경로, `oc` 로그인 상태)
 
-render·precheck·stage-b·stage-a는 `RUN_DIR`당 한 번만 실행된다. cleanup은 완료 전까지 같은 RUN에서 다시 시도할 수 있다(`cleanup-attempt-N`).
+render·precheck·prepare·stage-b·stage-a는 `RUN_DIR`당 한 번만 실행된다. cleanup은 완료 전까지 같은 RUN에서 다시 시도할 수 있다(`cleanup-attempt-N`).
 
 ```bash
 # 0) render — 로컬, oc 호출 없음
@@ -91,15 +101,21 @@ export RUN_DIR=<위 RUN_DIR> APPROVED_BUNDLE_SHA256=<승인값>
 CTX=<context> API=https://api.<cluster>:443 EXPECTED_CLUSTER_ID=<uuid> EXPECTED_NS_UID=<uuid> \
   bash platform/netpol/netpol-run.sh precheck
 
-# 6) stage-b — #37 T3 PASS 직후
-STAGE_C_REF=<url> T3_REF=<url> DB_WINDOW_REF=<url> bash platform/netpol/netpol-run.sh stage-b
+# 6) prepare — #37 T3 PASS 직후. 시험 자원 생성·결속 확인, TCP 없음
+STAGE_C_REF=<url> T3_REF=<url> DB_WINDOW_REF=<url> bash platform/netpol/netpol-run.sh prepare
+# → BINDING_SHA256=<64hex>, prepare/binding.tsv 를 재환 님께 전달(분류표 ② 고정)
 
-# 7) stage-a — stage-b 직후 이어서
+# 7) stage-b — 분류표 고정 확인 뒤
+BINDING_SHA256=<prepare 출력값> bash platform/netpol/netpol-run.sh stage-b
+
+# 8) stage-a — stage-b 직후 이어서
 bash platform/netpol/netpol-run.sh stage-a
 
-# 8) cleanup — HOLD(rc 60)면 원인 해소 뒤 같은 명령으로 재시도
+# 9) cleanup — HOLD(rc 60)면 원인 해소 뒤 같은 명령으로 재시도
 bash platform/netpol/netpol-run.sh cleanup
 ```
+
+`binding.tsv` 칸: Pod · Pod UID · Pod IP · 노드 · 노드 UID · 예상 egress IP(노드 InternalIP) · imageID · 라벨.
 
 `stage-b`·`stage-a`는 시작·끝 시각을 `notice.txt`와 화면에 찍는다. **재환 님께 이 시각을 알려** Relay `to_onprem`·vpn-gw01 `from_vpc` 카운터와 db01 출발지 관측을 같은 구간으로 묶는다(#37 Q2). 각 시도의 UTC 시작·끝은 `results.tsv`에 있다.
 
@@ -108,6 +124,8 @@ bash platform/netpol/netpol-run.sh cleanup
 | 단계 | 시험 | 기대 | 실패 시 |
 |---|---|---|---|
 | precheck | C1 Worker IP 전부 `WORKER_CIDR` / C3 OVN / C4 router 라벨 / C5 DNS 5353 / 대상 NS 비어 있음 / 7개 파일 server dry-run | 모두 충족 | rc 20 STOP(변경 없음) |
+| prepare | 시험 Pod UID = OWNED 기록, Pod IP 있음, 노드·노드 IP가 precheck worker 목록에 있음, imageID digest = 승인값, tcp-allowed·tcp-control 노드에 시험 외 비시스템 Pod 없음 | 모두 충족 | rc 22 STOP(TCP 없음) → cleanup |
+| stage-b·stage-a 시작 | `BINDING_SHA256` 일치(stage-b), 결속이 prepare 기록과 같음, 시험 외 Pod 없음 | 모두 충족 | rc 30 / rc 22 — 첫 TCP·정책 적용 전 STOP |
 | stage-b (B) | P1 DB, N1 대조 Pod→DB, N5 Pod 간 진입, P3 DNS, (P2 Registry) | CONNECTED / OK | rc 40 — **정책 시험으로 넘어가지 않음**. 경로·T3 상태 확인 후 cleanup |
 | stage-b (B) | N2 승인 밖 포트, N3 승인 밖 IP, N4 인터넷, R1·R2 | 기록만 | — |
 | stage-a | 정책 집합 = 이 시험의 5개, 00 spec = `podSelector {}` + Ingress·Egress, 허용 규칙 없음, 정책 원본 YAML 수집 | 일치·수집 성공 | rc 42 / 원본 실패는 rc 11(EVIDENCE_INCOMPLETE) |
@@ -130,7 +148,7 @@ bash platform/netpol/netpol-run.sh cleanup
 - 플랫폼 정책은 하나씩 성공할 때마다 `np-applied.tsv`에 APPLIED로 기록하고 `policy-set.txt`를 `NONE`→`PARTIAL`→`FULL`로 갱신한다. `PARTIAL`이면 cleanup이 시험 자원을 정리해도 rc 61로 끝나며 **앱 배포·Handoff READY 금지**다.
 - 이름만으로 자원을 인수하거나 삭제하지 않는다.
 
-종료 코드 전체: `0` 성공, `2` 입력, `10` 대상 불일치, `11` 조회 오류·필수 증적 실패, `20` precheck 불충족, `21` bundle 불일치, `30` 순서·시각(이전 단계 없음·다른 bundle/대상·재실행·Pod 수명), `40` B 기준 불성립, `41` apply·Ready 실패(부분 기록), `42` 정책 집합/00 spec, `50` A FAIL, `51` A 판정 불가, `60` cleanup HOLD, `61` 정리 완료·부분 정책.
+종료 코드 전체: `0` 성공, `2` 입력, `10` 대상 불일치, `11` 조회 오류·필수 증적 실패, `20` precheck 불충족, `21` bundle 불일치, `22` Pod·노드 결속 확인 실패(TCP 전 STOP), `30` 순서·시각(이전 단계 없음·다른 bundle/대상/결속·`BINDING_SHA256` 불일치·재실행·Pod 수명), `40` B 기준 불성립, `41` apply·Ready 실패(부분 기록), `42` 정책 집합/00 spec, `50` A FAIL, `51` A 판정 불가, `60` cleanup HOLD, `61` 정리 완료·부분 정책.
 
 ## 6. Handoff (→ #4)
 
@@ -158,7 +176,8 @@ stage-b 전이면 9번은 `PENDING`(실행기 출력 없음)으로 #4에 적는�
 | `<단계>/commands.tsv`, `*.out/.err/.rc` | 모든 명령의 UTC 시각·rc·argv(비밀값 없음)·원본 출력 |
 | `<단계>/context.txt` | `ENV=ROSA`, Cluster ID, NS·UID, whoami, oc client·bash 버전 |
 | `precheck/worker-ips.tsv` | 창 시작 출발지 목록(worker 노드 IP) |
-| `stage-b/created.tsv` | 시험 자원 이름·UID·OWNED/UNCONFIRMED·원본 파일 |
+| `prepare/created.tsv` | 시험 자원 이름·UID·OWNED/UNCONFIRMED·원본 파일 |
+| `prepare/binding.tsv`, `node-pods-*.out`, `stage-*/binding-now.tsv` | 시험 Pod·노드 결속(측정 전 확인점)과 시험 노드 Pod 목록, 측정 직전 재확인 |
 | `stage-*/results.tsv` | 단계·ID·시작/끝 UTC·Pod·목적지·exec/tcp rc·판정 |
 | `stage-a/np-applied.tsv`, `np-objects.tsv`, `np-yaml.out`, `np-effect.tsv` | 정책별 UID·spec SHA-256·상태, 적용 직후 원본, 정책 효과 주장 |
 | `policy-set.txt` | `NONE`/`PARTIAL`/`FULL` |
@@ -179,7 +198,7 @@ kubeconfig·토큰·Pull Secret 원문은 남기지 않는다(`whoami` 이름만
 
 ## 8. 시험 범위와 실행 전 조건
 
-- **MOCK:** `bash platform/netpol/tests/netpol-run-mock.sh` → 90/90 PASS (2026-10-16, Windows Git Bash, 가짜 `oc`·`curl`). 단계 순서·재실행 거부·판정 분기·쓰기 0(precheck)·승인 입력/kit/대상 변조 STOP·부분 생성/부분 정책 기록·UNCONFIRMED 미삭제·cleanup 재시도·TLS 실패·R2 rc·증적 실패·exec 시간 초과·N2~N4 수집 실패 INCONCLUSIVE를 본다. **실제 클러스터·OVN·router 동작 PASS가 아니다.**
+- **MOCK:** `bash platform/netpol/tests/netpol-run-mock.sh` → 110/110 PASS (2026-10-16, Windows Git Bash, 가짜 `oc`·`curl`). 단계 순서·Pod·노드 결속(digest 불일치·시험 노드 앱 Pod·노드 이동 → TCP 전 STOP, `BINDING_SHA256` 확인점)·바깥 exec 실패 시 표식 무시(R5)·재실행 거부·판정 분기·쓰기 0(precheck)·승인 입력/kit/대상 변조 STOP·부분 생성/부분 정책 기록·UNCONFIRMED 미삭제·cleanup 재시도·TLS 실패·R2 rc·증적 실패·exec 시간 초과·N2~N4 수집 실패 INCONCLUSIVE를 본다. **실제 클러스터·OVN·router 동작 PASS가 아니다.**
 - **실행 전 조건(없는 입력을 합성하지 않음):** 시험 이미지의 필수 도구·SCC 적합성과 승인 digest, N3 실제 대상과 안전성, D22 선택, IF-18 수용, #37 단계 C·T3·db01 창의 유효성, 작업창 시각 배정. 별도 Namespace나 DB 창 연장은 이 키트로 승인되지 않는다.
 - **O2:** httpd-24 기본 응답 코드(빈 문서 루트면 200이 아닐 수 있음). 실제 확인 뒤 `R1_EXPECTED_CODES`를 승인 입력으로 정한다.
 - **O4:** cleanup의 UID 대조와 삭제 사이에는 짧은 경합 구간이 있다(`oc delete`에 UID 조건 옵션 없음). 이 NS의 다른 writer가 없다는 시작 조건으로 막는다.
