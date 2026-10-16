@@ -89,19 +89,31 @@ rec TARGET "bootstrap 대상·⑩-b server·describe api.url 일치" match match
 rcpt="$BOOT_EV/99-receipt.env"
 [[ -s "$rcpt" ]] || { log "STOP: 완료 receipt 없음($rcpt) — 회수 확인이 끝난 회차가 아님"; exit 1; }
 rv() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; f = 1 } END { exit !f }' "$rcpt"; }
-sha_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+# 해시는 rc·형식을 검사한 뒤에만 낸다(리뷰 5530751510 R3). 실패를 빈 값으로 넘기지 않는다.
+sha_of() {
+  local out
+  out=$(sha256sum -- "$1") || return 1
+  out=${out%% *}
+  [[ "$out" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$out"
+}
 for kv in "RECEIPT_VERSION=1" "CLUSTER_ID=$CLUSTER_ID" "API_URL=$API_URL" "USER=$U"; do
   grep -qxF "$kv" "$rcpt" || { log "STOP: receipt 불일치(${kv%%=*})"; exit 1; }
 done
 st=$(rv STATUS || true); frc=$(rv FINAL_RC || true)
 [[ ( "$st" == COMPLETE && "$frc" == 0 ) || ( "$st" == POLICY_PENDING && "$frc" == 3 ) ]] \
   || { log "STOP: receipt 상태 이상(STATUS=$st FINAL_RC=$frc)"; exit 1; }
-chk() { # 이름 파일 receipt-키
+chk() { # 이름 파일 receipt-키 — 계산 실패·receipt 값 누락·형식 오류·불일치 모두 STOP(빈 값끼리 같다고 보지 않음)
+  local got want
   [[ -s "$2" ]] || { log "STOP: $1 파일 없음/빈 파일($2)"; exit 1; }
-  [[ "$(sha_of "$2")" == "$(rv "$3" || true)" ]] || { log "STOP: $1 해시가 receipt 와 다름(변조·다른 회차)"; exit 1; }
+  got=$(sha_of "$2") || { log "STOP: $1 해시 계산 실패"; exit 1; }
+  want=$(rv "$3")    || { log "STOP: receipt 에 $3 없음"; exit 1; }
+  [[ "$want" =~ ^[0-9a-f]{64}$ ]] || { log "STOP: receipt $3 형식 오류"; exit 1; }
+  [[ "$got" == "$want" ]] || { log "STOP: $1 해시가 receipt 와 다름(변조·다른 회차)"; exit 1; }
 }
 chk "회수 전 세션 kubeconfig" "$OLD" OLD_KUBECONFIG_SHA256
 chk "대상 기록" "$BOOT_EV/00-target.env" TARGET_SHA256
+chk "namespace UID 기록(⑤)" "$BOOT_EV/05-ns-uid.txt" NS_UID_SHA256   # UID 대조(D-11a 뒤)보다 먼저 원본을 검산
 chk "인벤토리 SHA256SUMS" "$BOOT_EV/10b-inventory/SHA256SUMS" INVENTORY_SUMS_SHA256
 chk "경로 검토" "$BOOT_EV/10b-path-review.tsv" PATH_REVIEW_SHA256
 ( cd "$BOOT_EV/10b-inventory" && sha256sum -c --quiet SHA256SUMS ) >"$EV/inventory-sumcheck.txt" 2>&1 \
@@ -110,6 +122,20 @@ chk "경로 검토" "$BOOT_EV/10b-path-review.tsv" PATH_REVIEW_SHA256
 osrv=$(KUBECONFIG="$OLD" oc config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
 [[ "$osrv" == "$API_URL" ]] || { log "STOP: 회수 전 세션 server($osrv) ≠ API_URL"; exit 1; }
 rec RECEIPT "receipt·해시·회수 전 세션 server 일치" match match -
+
+# 판정 입력 기록(리뷰 5530751510 비차단): 같은 판정을 나중에 재현할 수 있게 policy·분류기·키트 버전을 남긴다.
+{
+  printf 'POLICY_FILE=%s\n' "$POLICY_FILE"
+  if [[ -f "$POLICY_FILE" ]]; then
+    p=$(sha_of "$POLICY_FILE") || { log "STOP: policy 해시 계산 실패"; exit 1; }
+    printf 'POLICY_SHA256=%s\n' "$p"
+  else
+    printf 'POLICY_SHA256=ABSENT\n'
+  fi
+  c=$(sha_of "$KIT_DIR/classify-access-paths.sh") || { log "STOP: 분류기 해시 계산 실패"; exit 1; }
+  printf 'CLASSIFIER_SHA256=%s\n' "$c"
+  printf 'KIT_GIT_SHA=%s\n' "$(git -C "$KIT_DIR" rev-parse HEAD 2>/dev/null || echo UNKNOWN)"
+} >"$EV/00-judgement-inputs.env"
 
 # ⑩-b 저장 증적을 같은 규칙으로 오프라인 재판정(승인된 policy 필요). 0 이 아니면 판정 전에 STOP.
 crc=0

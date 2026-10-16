@@ -138,21 +138,39 @@ cleanup() {
   exit "$rc"
 }
 
-sha_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+# 해시는 rc·형식을 검사한 뒤에만 낸다(리뷰 5530751510 R3). 실패를 빈 문자열로 넘기지 않는다.
+sha_of() {
+  local out
+  out=$(sha256sum -- "$1") || return 1
+  out=${out%% *}
+  [[ "$out" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$out"
+}
 issue_receipt() {
-  local status=COMPLETE f
+  local status=COMPLETE f now h_old h_tgt h_uid h_inv h_rev tmp="$EV/99-receipt.env.tmp"
   [[ $1 == 3 ]] && status=POLICY_PENDING
-  for f in "$KUBECONFIG" "$EV/00-target.env" "$EV/10b-inventory/SHA256SUMS" "$EV/10b-path-review.tsv"; do
+  for f in "$KUBECONFIG" "$EV/00-target.env" "$EV/05-ns-uid.txt" "$EV/10b-inventory/SHA256SUMS" "$EV/10b-path-review.tsv"; do
     [[ -s "$f" ]] || { log "RECEIPT: 필요한 파일 없음($f)"; return 1; }
   done
-  {
+  # 모든 값을 먼저 계산·검증한다. 하나라도 실패하면 receipt 를 만들지 않는다.
+  h_old=$(sha_of "$KUBECONFIG")                     || { log "RECEIPT: 회수 전 세션 해시 실패"; return 1; }
+  h_tgt=$(sha_of "$EV/00-target.env")              || { log "RECEIPT: target 해시 실패"; return 1; }
+  h_uid=$(sha_of "$EV/05-ns-uid.txt")              || { log "RECEIPT: namespace UID 해시 실패"; return 1; }
+  h_inv=$(sha_of "$EV/10b-inventory/SHA256SUMS")   || { log "RECEIPT: 인벤토리 SHA256SUMS 해시 실패"; return 1; }
+  h_rev=$(sha_of "$EV/10b-path-review.tsv")        || { log "RECEIPT: path-review 해시 실패"; return 1; }
+  now=$(date '+%FT%T%z')                            || return 1
+  # 임시 파일에 완성본을 쓴 뒤 한 번에 확정(rename). 쓰기·확정 실패 시 불완전 파일을 남기지 않는다.
+  if ! {
     printf 'RECEIPT_VERSION=1\nSTATUS=%s\nFINAL_RC=%s\n' "$status" "$1"
-    printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nREVOKE_VERIFIED_AT=%s\n' "$CLUSTER_ID" "$API_URL" "$U" "$(date '+%FT%T%z')"
-    printf 'OLD_KUBECONFIG_SHA256=%s\n' "$(sha_of "$KUBECONFIG")"
-    printf 'TARGET_SHA256=%s\n' "$(sha_of "$EV/00-target.env")"
-    printf 'INVENTORY_SUMS_SHA256=%s\n' "$(sha_of "$EV/10b-inventory/SHA256SUMS")"
-    printf 'PATH_REVIEW_SHA256=%s\n' "$(sha_of "$EV/10b-path-review.tsv")"
-  } >"$EV/99-receipt.env"
+    printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nREVOKE_VERIFIED_AT=%s\n' "$CLUSTER_ID" "$API_URL" "$U" "$now"
+    printf 'OLD_KUBECONFIG_SHA256=%s\nTARGET_SHA256=%s\nNS_UID_SHA256=%s\n' "$h_old" "$h_tgt" "$h_uid"
+    printf 'INVENTORY_SUMS_SHA256=%s\nPATH_REVIEW_SHA256=%s\n' "$h_inv" "$h_rev"
+  } >"$tmp"; then
+    rm -f -- "$tmp"; log "RECEIPT: 쓰기 실패"; return 1
+  fi
+  if ! mv -f -- "$tmp" "$EV/99-receipt.env"; then
+    rm -f -- "$tmp" "$EV/99-receipt.env"; log "RECEIPT: 확정(rename) 실패"; return 1
+  fi
   log "RECEIPT_ISSUED status=$status $EV/99-receipt.env"
 }
 trap cleanup EXIT

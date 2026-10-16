@@ -52,6 +52,10 @@ case "${MOCK_USERS_MODE:-header}" in
 esac
 EOF
 chmod +x "$T/bin/oc" "$T/bin/rosa"
+# 실패 주입용 sha256sum(post 실행에만 쓰임). 지정 경로에서만 실패하고 그 밖에는 진짜 명령으로 넘긴다(리뷰 5530751510 R3)
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ -n "${MOCK_SHA_FAIL:-}" && "$a" == *"$MOCK_SHA_FAIL" ]] && { echo "mock sha256sum failure" >&2; exit 42; }; done\nexec %q "$@"\n' \
+  "$(command -v sha256sum)" >"$T/bin/sha256sum"
+chmod +x "$T/bin/sha256sum"
 
 # 승인 policy(시험 전용): self-provisioners 1행, 규칙 해시는 분류기와 같은 정규화
 norm() { jq -cS '{rules: (.rules // []), aggregationRule: (.aggregationRule // null)}' | sha256sum | cut -d' ' -f1; }
@@ -84,11 +88,17 @@ mk_fixture() { # home
     printf 'CLUSTER_ID=mock-id\nAPI_URL=https://api.mock:443\nUSER=hayeoung\nREVOKE_VERIFIED_AT=x\n'
     printf 'OLD_KUBECONFIG_SHA256=%s\n' "$(sha "$home/rosa-idp/kubeconfig")"
     printf 'TARGET_SHA256=%s\n' "$(sha "$ev/00-target.env")"
+    [[ "${RC_NO_UID:-0}" == 1 ]] || printf 'NS_UID_SHA256=%s\n' "$(sha "$ev/05-ns-uid.txt")"
     printf 'INVENTORY_SUMS_SHA256=%s\n' "$(sha "$inv/SHA256SUMS")"
     printf 'PATH_REVIEW_SHA256=%s\n' "$(sha "$ev/10b-path-review.tsv")"
   } >"$ev/99-receipt.env"
   # receipt 발행 뒤 변조·누락 주입
   [[ "${NO_RECEIPT:-0}" == 1 ]] && rm -f "$ev/99-receipt.env"
+  # receipt 값 자체의 결함(생산자 버그 가정): 빈 해시 / 형식 오류 해시
+  [[ "${RC_EMPTY_OLD:-0}" == 1 ]] && sed -i 's/^OLD_KUBECONFIG_SHA256=.*/OLD_KUBECONFIG_SHA256=/' "$ev/99-receipt.env"
+  [[ "${RC_BAD_HASH:-0}" == 1 ]] && sed -i 's/^TARGET_SHA256=.*/TARGET_SHA256=zzzz/' "$ev/99-receipt.env"
+  # receipt 발행 뒤 namespace UID 원본을 다른 값으로 교체(현재 UID 도 같은 값으로 맞춰 UID 비교만으로는 못 잡게 함)
+  [[ "${TAMPER_UID:-0}" == 1 ]] && sed -i 's/^fds-app .*/fds-app uid-other/' "$ev/05-ns-uid.txt"
   [[ "${TAMPER_REVIEW:-0}" == 1 ]] && printf 'APPROVED\tci-cd\thayeoung-admin\n' >>"$ev/10b-path-review.tsv"
   [[ "${TAMPER_INV:-0}" == 1 ]] && echo '{"kind":"ClusterRole","rules":[{"verbs":["*"]}]}' >"$inv/clusterrole-self-provisioner.json"
   [[ "${SWAP_OLD:-0}" == 1 ]] && echo "other-session" >"$home/rosa-idp/kubeconfig"
@@ -111,7 +121,12 @@ case_() { # name expect_rc [env...]   — 환경변수 주입은 fixture 와 실
   # 새 세션 kubeconfig 는 어떤 결과든 남으면 안 됨. 회수 전 세션은 PASS(rc0)면 지워지고, FAIL 이면 조사용으로 남는다.
   local ok=PASS
   [[ $rc == "$expect" && $new_left == no ]] || ok=FAIL
-  if [[ $rc == 0 ]]; then [[ $old_left == no ]] || ok=FAIL; fi
+  if [[ $rc == 0 ]]; then
+    [[ $old_left == no ]] || ok=FAIL
+    # PASS 회차엔 판정 입력 기록(policy·분류기 해시)이 있어야 함(비차단 보완)
+    grep -qE '^CLASSIFIER_SHA256=[0-9a-f]{64}$' "$home"/rosa-idp/d11-*/00-judgement-inputs.env 2>/dev/null || ok=FAIL
+    grep -qE '^POLICY_SHA256=[0-9a-f]{64}$' "$home"/rosa-idp/d11-*/00-judgement-inputs.env 2>/dev/null || ok=FAIL
+  fi
   [[ "$ok" == PASS ]] || fail=1
   printf '%-30s rc=%-2s expect=%-2s old_kubeconfig_left=%-3s new_kubeconfig_left=%-3s => %s\n' \
     "$name" "$rc" "$expect" "$old_left" "$new_left" "$ok"
@@ -148,4 +163,10 @@ case_ P23_empty_paths               1 FIX_EMPTY_PATHS=1
 # 정책 승인 대기 회차(rc3): policy 가 없으면 STOP, 승인된 policy 가 있으면 오프라인 재판정으로 PASS
 case_ P24_pending_without_policy    1 RC_STATUS=POLICY_PENDING RC_FINAL=3 POLICY_FILE="$T/no-such-policy.tsv"
 case_ P25_pending_with_policy       0 RC_STATUS=POLICY_PENDING RC_FINAL=3
+# 리뷰 5530751510 R3: 해시 실패·빈 값·형식 오류·UID 원본 미결속
+case_ P26_consumer_hash_fail        1 MOCK_SHA_FAIL=rosa-idp/kubeconfig   # 회수 전 세션 해시 계산 실패 → 빈 값끼리 같다고 보지 않음
+case_ P27_receipt_empty_hash        1 RC_EMPTY_OLD=1
+case_ P28_receipt_malformed_hash    1 RC_BAD_HASH=1
+case_ P29_ns_uid_file_swapped       1 TAMPER_UID=1 MOCK_UID_MISMATCH=1    # 수정 전: 원본·현재 UID 를 같이 바꾸면 PASS 했음
+case_ P30_receipt_without_uid_hash  1 RC_NO_UID=1
 exit "$fail"

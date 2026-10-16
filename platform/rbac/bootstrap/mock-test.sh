@@ -114,6 +114,11 @@ esac
 exit 0
 EOF
 chmod +x "$T/bin/rosa" "$T/bin/oc"
+# 실패 주입용 sha256sum / mv: 지정한 경우에만 실패하고, 그 밖에는 진짜 명령으로 넘긴다(리뷰 5530751510 R3)
+real_sha=$(command -v sha256sum); real_mv=$(command -v mv)
+printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ -n "${MOCK_SHA_FAIL:-}" && "$a" == *"$MOCK_SHA_FAIL" ]] && { echo "mock sha256sum failure" >&2; exit 42; }; done\nexec %q "$@"\n' "$real_sha" >"$T/bin/sha256sum"
+printf '#!/usr/bin/env bash\n[[ "${MOCK_MV_FAIL:-0}" == 1 && "$*" == *99-receipt.env* ]] && { echo "mock mv failure" >&2; exit 1; }\nexec %q "$@"\n' "$real_mv" >"$T/bin/mv"
+chmod +x "$T/bin/sha256sum" "$T/bin/mv"
 
 mk_steps() { # $1 name, $2 body
   printf 'run_steps() {\n%s\n}\n' "$2" >"$T/$1.sh"
@@ -235,6 +240,9 @@ run_case 35_policy_malformed_stops      template 1 MOCK_TOKEN=1 POLICY_FILE="$HE
 # 리뷰 5530426592 R5: 머리글 정상 + 깨진/불완전 본문은 '부재'가 아님 → 회수 확인 UNKNOWN → CLEANUP_REQUIRED
 run_case 36_mgmt_header_broken_body     normal   1 MOCK_USERS_MODE=headerbroken
 run_case 37_mgmt_row_without_groups     normal   1 MOCK_USERS_MODE=nogroup
+# 리뷰 5530751510 R3: receipt 해시 계산 실패·확정(rename) 실패 → 완료 receipt 없음, rc1 (회수는 정상)
+REQUIRE_ERR='RECEIPT: 회수 전 세션 해시 실패' run_case 42_receipt_hash_fail template 1 MOCK_TOKEN=1 MOCK_SHA_FAIL=rosa-idp/kubeconfig
+REQUIRE_ERR='RECEIPT: 확정\(rename\) 실패'      run_case 43_receipt_rename_fail template 1 MOCK_TOKEN=1 MOCK_MV_FAIL=1
 
 # 증적 확인(보완 3·4, 리뷰 R3): 25 정상 회차 / 34 정책 대기 회차의 target·read-rc·분류·receipt
 ev_of() { ls -d "$T"/home-"$1"/rosa-idp/evidence-* 2>/dev/null | head -1; }
@@ -245,6 +253,12 @@ grep -qx 'CLUSTER_ID=mock-id' "$ev25/00-target.env" 2>/dev/null && grep -qx 'USE
 grep -q $'^REVOKE_TARGET\tcluster\tcluster-admins' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
 grep -q $'^PLATFORM_DEFAULT\tcluster\tself-provisioners' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
 grep -qx 'STATUS=COMPLETE' "$ev25/99-receipt.env" 2>/dev/null && grep -qx 'FINAL_RC=0' "$ev25/99-receipt.env" || ok=FAIL
+# R3: receipt 의 해시 5개가 모두 64자리 hex(빈 값 없음), namespace UID 파일 포함
+[[ $(grep -cE '^(OLD_KUBECONFIG|TARGET|NS_UID|INVENTORY_SUMS|PATH_REVIEW)_SHA256=[0-9a-f]{64}$' "$ev25/99-receipt.env" 2>/dev/null) == 5 ]] || ok=FAIL
+for n in 42_receipt_hash_fail 43_receipt_rename_fail; do   # 실패 회차엔 receipt 도 임시 파일도 없음
+  e=$(ev_of "$n"); [[ -n "$e" ]] || { ok=FAIL; continue; }
+  [[ -e "$e/99-receipt.env" || -e "$e/99-receipt.env.tmp" ]] && ok=FAIL
+done
 grep -qx 'STATUS=POLICY_PENDING' "$ev34/99-receipt.env" 2>/dev/null && grep -qx 'FINAL_RC=3' "$ev34/99-receipt.env" || ok=FAIL
 grep -q $'^PENDING_POLICY\tcluster\tself-provisioners' "$ev34/10b-path-review.tsv" 2>/dev/null || ok=FAIL
 for n in 28_inventory_unexpected 31_auth_group_admin_stops 36_mgmt_header_broken_body; do    # 실패 회차엔 receipt 없음

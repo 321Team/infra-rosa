@@ -8,9 +8,11 @@
 ## 형식 (TSV, `#`로 시작하는 줄은 주석)
 
 ```
-scope	binding	roleRef.kind	roleRef.name	subjects	rules_sha256
+# scope	binding	roleRef.kind	roleRef.name	subjects	rules_sha256
 cluster	self-provisioners	ClusterRole	self-provisioner	Group:system:authenticated:oauth	<64자리 hex>
 ```
+
+머리글 줄은 반드시 `#`로 시작해야 합니다. `#` 없이 쓰면 데이터 행으로 읽혀 형식 오류로 STOP합니다.
 
 `rules_sha256`은 수집된 `clusterrole-<name>.json`을 아래처럼 정규화한 값입니다. 분류기와 같은 계산입니다.
 

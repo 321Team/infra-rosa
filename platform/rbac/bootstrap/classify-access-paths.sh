@@ -19,11 +19,14 @@
 # 주의: 수집한 값으로 policy 를 자동 생성·승인하지 않는다. policy 는 PR 리뷰를 거쳐 저장소에 들어간다.
 set -Eeuo pipefail
 INV="${1:?inventory-dir}"; U="${2:?user}"; POLICY="${3:?policy-file}"; OUT="${4:?out-tsv}"
-APPROVED_NAMESPACES="${APPROVED_NAMESPACES:-fds-app monitoring-api ci-cd}"
+# 승인 namespace 는 고정값이다(리뷰 5530751510 R1). 환경변수로 넓힐 수 없다 — 범위를 바꾸려면 이 파일을 PR 리뷰로 바꾼다.
+readonly APPROVED_NAMESPACES="fds-app monitoring-api ci-cd"
 paths="$INV/access-paths-$U.tsv"
 
 [[ -s "$paths" ]] || { echo "STOP: $paths 없음 또는 빈 파일(수집 누락)" >&2; exit 1; }
-[[ $(grep -vc '^#' "$paths" || true) -gt 0 ]] || { echo "STOP: 권한 경로 0건(수집 누락 의심)" >&2; exit 1; }
+# 주석·빈 줄을 뺀 '유효 5열 행'이 1개 이상이어야 한다(줄바꿈만 있는 파일 = 수집 누락)
+valid=$(awk -F'\t' '!/^#/ && NF == 5 && $1 != "" && $5 != "" { n++ } END { print n + 0 }' "$paths")
+[[ "$valid" =~ ^[0-9]+$ && "$valid" -gt 0 ]] || { echo "STOP: 유효 권한 경로 0건(수집 누락 의심)" >&2; exit 1; }
 
 have_policy=0
 if [[ -f "$POLICY" ]]; then
@@ -34,7 +37,17 @@ if [[ -f "$POLICY" ]]; then
   fi
 fi
 
-rules_sha() { jq -cS '{rules: (.rules // []), aggregationRule: (.aggregationRule // null)}' "$1" | sha256sum | cut -d' ' -f1; }
+# ClusterRole 규칙 정규화 해시. JSON 구조·jq·해시 중 하나라도 실패하면 rc1(빈 입력 해시로 대신하지 않음, 리뷰 R1).
+rules_sha() {
+  local norm out
+  jq -e 'type == "object" and .kind == "ClusterRole"' "$1" >/dev/null 2>&1 || return 1
+  norm=$(jq -cS '{rules: (.rules // []), aggregationRule: (.aggregationRule // null)}' "$1") || return 1
+  [[ -n "$norm" ]] || return 1
+  out=$(printf '%s\n' "$norm" | sha256sum) || return 1
+  out=${out%% *}
+  [[ "$out" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$out"
+}
 auth_re='^Group:system:authenticated(:oauth)?(,Group:system:authenticated(:oauth)?)*$'
 
 pending=0; bad=0
@@ -64,10 +77,10 @@ while IFS= read -r line; do
         why="policy 에 없는 기본 binding"
       elif [[ ! -s "$rf" ]]; then
         why="ClusterRole 수집 파일 없음"
-      elif [[ "$(rules_sha "$rf")" != "$want" ]]; then
-        why="ClusterRole 규칙이 승인값과 다름"
       else
-        c=PLATFORM_DEFAULT
+        # 해시를 계산하지 못하면 비교하지 않고 즉시 STOP(빈 값끼리 같다고 보지 않음)
+        got=$(rules_sha "$rf") || { echo "STOP: ClusterRole JSON·정규화·해시 실패($rf)" >&2; exit 1; }
+        if [[ "$got" != "$want" ]]; then why="ClusterRole 규칙이 승인값과 다름"; else c=PLATFORM_DEFAULT; fi
       fi
     fi
   fi

@@ -18,7 +18,7 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 | `collect-access-inventory.sh` | ⑩-b 권한 목록 저장(읽기 전용) |
 | `classify-access-paths.sh` | ⑩-b 경로 분류(오프라인 공용 규칙). bootstrap 과 회수 뒤 재판정에서 같은 규칙. 승인 policy 대조, rc 0/3/1 |
 | `post-revoke-check.sh` | ⑫ 회수 뒤 D-11 판정(회수 전 세션 → 새 로그인 → 관리면·SSAR·경로 검토 → 회수 전 세션 정리) |
-| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
+| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
 
 ## 생성 당일 순서 (요약)
 
@@ -110,6 +110,7 @@ bash platform/rbac/bootstrap/mock-test.sh; echo "rc=$?"
 SELFTEST_EXPECT=42 bash platform/rbac/bootstrap/mock-test.sh > /dev/null; echo "selftest rc=$? (1이어야 정상)"
 bash platform/rbac/bootstrap/mock-test-inventory.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-post.sh; echo "rc=$?"
+bash platform/rbac/bootstrap/mock-test-classify.sh; echo "rc=$?"
 ```
 
 ## 경계
