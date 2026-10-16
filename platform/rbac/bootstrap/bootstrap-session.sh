@@ -160,10 +160,11 @@ issue_receipt() {
   h_rev=$(sha_of "$EV/10b-path-review.tsv")        || { log "RECEIPT: path-review 해시 실패"; return 1; }
   now=$(date '+%FT%T%z')                            || return 1
   # 임시 파일에 완성본을 쓴 뒤 한 번에 확정(rename). 쓰기·확정 실패 시 불완전 파일을 남기지 않는다.
+  # 각 쓰기를 && 로 잇는다 — { a; b; } 는 마지막 명령의 rc 만 돌려주므로 중간 실패가 덮인다(리뷰 5542174606 R3, 이권욱 제시안).
   if ! {
-    printf 'RECEIPT_VERSION=1\nSTATUS=%s\nFINAL_RC=%s\n' "$status" "$1"
-    printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nREVOKE_VERIFIED_AT=%s\n' "$CLUSTER_ID" "$API_URL" "$U" "$now"
-    printf 'OLD_KUBECONFIG_SHA256=%s\nTARGET_SHA256=%s\nNS_UID_SHA256=%s\n' "$h_old" "$h_tgt" "$h_uid"
+    printf 'RECEIPT_VERSION=1\nSTATUS=%s\nFINAL_RC=%s\n' "$status" "$1" &&
+    printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nREVOKE_VERIFIED_AT=%s\n' "$CLUSTER_ID" "$API_URL" "$U" "$now" &&
+    printf 'OLD_KUBECONFIG_SHA256=%s\nTARGET_SHA256=%s\nNS_UID_SHA256=%s\n' "$h_old" "$h_tgt" "$h_uid" &&
     printf 'INVENTORY_SUMS_SHA256=%s\nPATH_REVIEW_SHA256=%s\n' "$h_inv" "$h_rev"
   } >"$tmp"; then
     rm -f -- "$tmp"; log "RECEIPT: 쓰기 실패"; return 1
