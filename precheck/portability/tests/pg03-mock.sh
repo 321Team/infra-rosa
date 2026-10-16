@@ -37,6 +37,12 @@ case "$args" in
     printf '11111111-2222-3333-4444-555555555555'; exit 0;;
   "get namespace fds-app -o jsonpath={.metadata.uid}")
     [[ "$SCENARIO" == ns_mismatch ]] && { printf '00000000-0000-0000-0000-000000000000'; exit 0; }
+    # 같은 조회가 처음(대상 확인)과 마지막(종료 확인)에 두 번 온다. 두 번째 호출에서만 실패를 만든다.
+    if [[ "$(grep -c 'get namespace fds-app -o jsonpath={.metadata.uid}$' "$CALLLOG")" -ge 2 ]]; then
+      [[ "$SCENARIO" == final_ns_diff ]] && { printf '99999999-0000-0000-0000-000000000000'; exit 0; }
+      [[ "$SCENARIO" == final_ns_fail_empty ]] && { echo 'Error from server (Forbidden)' >&2; exit 1; }
+      [[ "$SCENARIO" == final_ns_fail_with_uid ]] && { printf 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; echo 'error: unexpected EOF' >&2; exit 1; }
+    fi
     printf 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; exit 0;;
   "get namespace fds-app -o jsonpath="*) printf '1000740000/10000\n1000740000/10000\n'; exit 0;;
   whoami) echo mock-user; exit 0;;
@@ -155,6 +161,11 @@ check server_mismatch 10 no SCENARIO=server_mismatch
 check cluster_mismatch 10 yes SCENARIO=cluster_mismatch
 check cluster_403 10 yes SCENARIO=cluster_403
 check ns_mismatch 10 yes SCENARIO=ns_mismatch
+# 판정이 정상이어도 마지막 namespace 확인이 실패하면 10(SHA256SUMS로 마감하지 않음)
+for s in final_ns_diff final_ns_fail_empty final_ns_fail_with_uid; do
+  check "$s" 10 yes SCENARIO="$s"
+  [[ -f "$T/out-$s/namespace-final.rc" && ! -f "$T/out-$s/SHA256SUMS" ]] || { echo "FAIL $s: final check not recorded or evidence sealed"; exit 1; }
+done
 
 # 수집 오류: 지원 안 되는 객체 rc7, 부분 출력, Deployment 누락, SA 조회 403
 check review_rc7 11 yes SCENARIO=review_rc7
