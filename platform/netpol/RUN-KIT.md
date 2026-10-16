@@ -31,14 +31,16 @@ TEST-PLAN C1은 `10.20.0.0/16`을 기준으로 했지만, 이 키트는 단계 C
 | 4 | 재환 | 단계 D **T3 첫 PASS** | — | T3 기록 댓글(`T3_REF`) |
 | **5** | **하영** | **시험 자원 생성 → 정책 전(B) 측정** | `stage-b` | `STAGE_B_OK` |
 | **6** | **하영** | **00→01→02→03 적용 → 정책 후(A) 측정 → Handoff 8·9** | `stage-a` | `STAGE_A_PASS`, 재환 님께 "#7 종료" 통보 |
-| 7 | 재환 | T6 → T3(복구 후) → T7~T9·T11 | — | — |
+| 7 | 재환 | T6 → T3(복구 후). **T7·T9·T11은 다음 창으로 미룸**(db01 창 시간, #37 6205733242 Q1). T8은 원래 별도 창 | — | — |
 | 8 | 하영 | 시험 자원 정리(00~03 유지) | `cleanup` | `CLEANUP_OK` |
 | 9 | 재환·권욱 | T12, 임시 인스턴스 삭제, db01 `pre-rollback`·readback | — | #7 5~6번이 끝난 뒤에만 |
 
 - 5~6번을 T3 직후에 두는 이유: T6(SA 내림)·T7(재시작)·T8(재부팅) 중에는 터널이 흔들려 #7 B/A 판정이 섞인다.
 - 5~6번은 **한 번에 이어서** 한다. 시험 Pod는 `sleep 3600`·재시작 없음이라 `stage-a`는 Pod 생성 후 `POD_MAX_AGE_MIN`(기본 50분) 안에 시작해야 한다.
-- 대안(재환 님 창 시간 부족): 5~6번을 T11 뒤·T12 전에 둔다. **9번(`pre-rollback`) 뒤로는 미루지 않는다** — 그때는 P1·N1을 `PENDING(#37 창 없음)`으로 두고 별도 창 승인을 받는다.
+- "T11 뒤·T12 전" 대안은 db01 창 마감에 더 가까워 쓰지 않는다(재환 님 회신 Q1). **9번(`pre-rollback`) 뒤로는 미루지 않는다** — 그때는 P1·N1을 `PENDING(#37 창 없음)`으로 두고 별도 창 승인을 받는다.
 - 단계 C가 "상시 터널"이어도 db01 규칙은 위 F2대로 runtime 사전 창이다(영구 반영은 #47 A2). 단계 C 계획이 바뀌면 `STAGE_C_REF`·`DB_WINDOW_REF`가 가리키는 기록과 이 표를 다시 맞춘다.
+- 터널·Route를 상시 유지할지, 창마다 올렸다 내릴지는 **이권욱 결정 대기**(#37 6205733242 "먼저 정할 것 1"). 결정 전에는 창 단위로 진행하며, 어느 쪽이든 5~6번은 같은 창의 T3 직후에 둔다.
+- 시험 Namespace: `fds-app`에서 **앱 배포 전에** B→A를 한다. 기존 자원을 지워 시험 조건을 만들지 않는다(PR #41 리뷰 2026-10-16, Q6). 앱 자원이 이미 있으면 precheck·stage-b가 STOP한다.
 
 ## 3. 입력값과 출처
 
@@ -96,11 +98,14 @@ bash platform/netpol/netpol-run.sh cleanup
 | stage-b (B) | N2 승인 밖 포트, N3 승인 밖 IP, N4 인터넷 | 기록만 | — |
 | stage-a | 정책 집합 = 이 시험의 5개, 00 spec = `podSelector {}` + Ingress·Egress, 허용 규칙 없음 | 일치 | rc 42 STOP |
 | stage-a (A) | P1, (P2), P3 | CONNECTED / OK | rc 50 |
-| stage-a (A) | N1~N5 | TIMEOUT | CONNECTED면 rc 50, REFUSED·UNREACHABLE·TOOL_ERROR면 rc 51(차단 증거 아님) |
+| stage-a (A) | N1·N5 | TIMEOUT | CONNECTED면 rc 50, REFUSED·UNREACHABLE·TOOL_ERROR면 rc 51(차단 증거 아님) |
+| stage-a (A) | N2·N3·N4 | B CONNECTED였으면 TIMEOUT(`NP_EFFECT`). B부터 막혔으면 기록만(`NO_CLAIM_UPSTREAM`) | A CONNECTED면 rc 50. B CONNECTED였는데 A가 REFUSED 등이면 rc 51 |
 | stage-a | R1 `https://<route>/` (실행 위치=클러스터 밖), R2 `Admitted=True` | `R1_EXPECTED_CODES`, True | rc 50 |
 | cleanup | 이 RUN이 만든 7개만 UID 대조 삭제, 00~03 UID·spec 유지 | 일치 | rc 60 HOLD(지우지 않음) |
 
-- 정책 효과의 주 증거는 **N1(B CONNECTED → A TIMEOUT)** 이다. N2~N4는 B에서 이미 막혀 있을 수 있어 "승인 밖은 열려 있지 않음" 기록으로 쓴다.
+- 정책 효과(`NP_EFFECT`)는 **B CONNECTED → A TIMEOUT**일 때만 주장한다. N1·N5는 B가 열려 있어야 시작하므로 항상 이 조건이다.
+- N2·N3은 Relay SG가 worker 서브넷에서 TCP 5432만 허용해 **B부터 막힐 수 있다**(#37 6205733242 Q3). 그때 A TIMEOUT은 "승인 밖은 열려 있지 않음" 기록일 뿐 정책 차단 증거가 아니다(`NO_CLAIM_UPSTREAM`). 노드 캡처·OVN ACL 카운터로 정책 효과를 따로 증명하지 않는 대신 **주장하지 않는다**. N4(인터넷)도 같은 규칙이다.
+- 결과는 `stage-a/np-effect.tsv`(ID·B·A·주장)와 `handoff.txt`의 `NP_EFFECT=`·`NO_CLAIM_UPSTREAM=` 줄에 남는다.
 - N1이 A에서 막힐 때 Relay `to_onprem` 카운터가 **늘지 않아야** 노드(OVN)에서 막힌 것이다(Q2 카운터 기록과 묶음).
 - 자동 재시도·자동 원복은 없다. 실패하면 그 상태로 멈추고 `RUN_DIR`을 보존해 보고한다.
 
@@ -147,7 +152,7 @@ kubeconfig·토큰·Pull Secret 원문은 남기지 않는다(`whoami` 이름만
 
 ## 8. 시험 범위와 열린 항목
 
-- **MOCK:** `bash platform/netpol/tests/netpol-run-mock.sh` → 42/42 PASS (2026-10-16, Windows Git Bash, 가짜 `oc`·`curl`). 단계 순서·재실행 거부·판정 분기·쓰기 0(precheck)·UID 대조 정리를 본다. **실제 클러스터·OVN·router 동작 PASS가 아니다.**
+- **MOCK:** `bash platform/netpol/tests/netpol-run-mock.sh` → 47/47 PASS (2026-10-16, Windows Git Bash, 가짜 `oc`·`curl`). 단계 순서·재실행 거부·판정 분기·쓰기 0(precheck)·UID 대조 정리를 본다. **실제 클러스터·OVN·router 동작 PASS가 아니다.**
 - **O1:** 시험 이미지(ubi-minimal)에 `bash`·`timeout`·`getent`가 있는지 digest 고정 때 확인한다.
 - **O2:** httpd-24 기본 응답 코드(빈 문서 루트면 200이 아닐 수 있음). 실제 확인 뒤 `R1_EXPECTED_CODES`를 정하고 리뷰에 적는다.
 - **O3:** `oc exec`가 원격 종료 코드(124)를 그대로 돌려주는 것을 전제로 한다. 첫 실행에서 `probe-*.err`로 확인한다.

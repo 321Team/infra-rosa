@@ -92,6 +92,8 @@ case "$a" in
       [[ "$SCENARIO" == a_n1_refused ]] && { echo 'bash: connect: Connection refused' >&2; exit 1; }
       exit 124
     fi
+    if [[ "$ip:$port" == 10.1.93.50:443 && "$SCENARIO" == a_n3_refused && $pol == 1 ]]; then echo 'bash: connect: Connection refused' >&2; exit 1; fi
+    if [[ "$ip:$port" == 1.1.1.1:443 && "$SCENARIO" == a_n4_refused && $pol == 1 ]]; then echo 'bash: connect: Connection refused' >&2; exit 1; fi
     if [[ "$ip:$port" == 10.128.2.15:8080 ]]; then (( pol == 0 )) && exit 0; exit 124; fi
     if [[ "$ip:$port" == 1.1.1.1:443 ]]; then (( pol == 0 )) && exit 0; exit 124; fi
     if [[ "$ip:$port" == 10.1.93.55:22 && "$SCENARIO" == a_n2_connected && $pol == 1 ]]; then exit 0; fi
@@ -195,6 +197,8 @@ check "stage-b: 같은 RUN 재실행 거부" 30 bash "$SCRIPT" stage-b
 check "stage-a: 정상" 0 bash "$SCRIPT" stage-a
 assert "stage-a: 00→01→02→03 순서" bash -c 'grep -o "apply -f [^ ]*/0[0-3].yaml" "$CALLLOG" | sed "s#.*/##" | tr "\n" " " | grep -qx "00.yaml 01.yaml 02.yaml 03.yaml "'
 assert "stage-a: Handoff READY/YES" bash -c 'grep -q "^ROUTE_READY=YES" "$RUN_DIR/stage-a/handoff.txt" && grep -q "^HYBRID_ROUTE=READY" "$RUN_DIR/stage-a/handoff.txt"'
+assert "stage-a: B부터 막힌 N2·N3는 정책 효과 미주장" bash -c 'grep -qx "N2	TIMEOUT	TIMEOUT	NO_CLAIM_UPSTREAM" "$RUN_DIR/stage-a/np-effect.tsv" && grep -qx "N3	TIMEOUT	TIMEOUT	NO_CLAIM_UPSTREAM" "$RUN_DIR/stage-a/np-effect.tsv"'
+assert "stage-a: B CONNECTED→A TIMEOUT만 NP_EFFECT(N1,N4,N5)" bash -c 'grep -q "^NP_EFFECT=N1,N4,N5 " "$RUN_DIR/stage-a/handoff.txt" && grep -q "^NO_CLAIM_UPSTREAM=N2,N3 " "$RUN_DIR/stage-a/handoff.txt"'
 check "cleanup: 정상" 0 bash "$SCRIPT" cleanup
 assert "cleanup: 시험 자원 7개 삭제, 00~03 삭제 없음" bash -c '[[ $(grep -c " delete " "$CALLLOG") == 7 ]] && ! grep -E " delete networkpolicy/(fds-platform|allow-)" "$CALLLOG" | grep -q .'
 
@@ -205,6 +209,11 @@ new_case a2 a_n1_refused; to_stage_a
 check "stage-a: N1 REFUSED → 판정 불가" 51 bash "$SCRIPT" stage-a
 new_case a3 a_n2_connected; to_stage_a
 check "stage-a: N2 연결됨 → FAIL" 50 bash "$SCRIPT" stage-a
+new_case a6 a_n3_refused; to_stage_a
+check "stage-a: B부터 막힌 N3가 A에서 REFUSED → 판정 불가 아님(미주장 기록)" 0 bash "$SCRIPT" stage-a
+assert "stage-a: 그 N3는 NO_CLAIM_UPSTREAM" bash -c 'grep -qx "N3	TIMEOUT	REFUSED	NO_CLAIM_UPSTREAM" "$RUN_DIR/stage-a/np-effect.tsv"'
+new_case a7 a_n4_refused; to_stage_a
+check "stage-a: B CONNECTED였던 N4가 A에서 REFUSED → 판정 불가" 51 bash "$SCRIPT" stage-a
 new_case a4 pod_old; to_stage_a
 check "stage-a: 시험 Pod 수명 초과 → STOP" 30 bash "$SCRIPT" stage-a
 assert "stage-a: 수명 초과 시 정책 미적용" bash -c '! [[ -f "$STATE/applied-00" ]]'

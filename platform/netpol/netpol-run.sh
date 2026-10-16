@@ -393,7 +393,17 @@ if [[ "$PHASE" == stage-a ]]; then
   expect P1 CONNECTED
   [[ "$REG_MODE" == include ]] && expect P2 CONNECTED
   [[ "$(verdict P3)" == OK ]] || FAILS+=("P3:DNS FAIL")
-  for id in N1 N2 N3 N4 N5; do expect "$id" TIMEOUT; done
+  # NetworkPolicy 효과는 B CONNECTED → A TIMEOUT일 때만 주장한다.
+  # N2~N4는 B에서 이미 막힐 수 있다(예: Relay SG가 worker 서브넷에서 5432만 허용 — #37 6205733242 Q3).
+  # 그때 A TIMEOUT은 "승인 밖은 열려 있지 않음" 기록일 뿐 정책 차단 증거가 아니다(NO_CLAIM_UPSTREAM).
+  for id in N1 N2 N3 N4 N5; do
+    b="$(awk -F'\t' -v id="$id" '$2==id {v=$8} END {print v}' "$RUN_DIR/stage-b/results.tsv")"; a="$(verdict "$id")"
+    if [[ "$a" == CONNECTED ]]; then claim=FAIL_OPEN; FAILS+=("$id:CONNECTED(정책 후 열림)")
+    elif [[ "$b" == CONNECTED ]]; then
+      if [[ "$a" == TIMEOUT ]]; then claim=NP_EFFECT; else claim=INCONCLUSIVE; INCONCL+=("$id:$a"); fi
+    else claim=NO_CLAIM_UPSTREAM; fi
+    printf '%s\t%s\t%s\t%s\n' "$id" "$b" "$a" "$claim" >>"$PD/np-effect.tsv"
+  done
   r1_ok=NO; [[ ",$R1_EXPECTED_CODES," == *",$r1_code,"* ]] && r1_ok=YES
   r2_ok=NO; [[ "$(out_of r2)" == True ]] && r2_ok=YES
   [[ $r1_ok == YES ]] || FAILS+=("R1:$r1_code(기대 $R1_EXPECTED_CODES)")
@@ -407,6 +417,8 @@ if [[ "$PHASE" == stage-a ]]; then
   {
     echo "ROUTE_READY=$route_ready  # R1=$r1_code TLS=$r1_tls, R2=$(out_of r2)"
     echo "HYBRID_ROUTE=$hybrid  # C1=$(st C1) P1(A)=$(verdict P1) N1(B→A)=$b_n1→$(verdict N1)"
+    echo "NP_EFFECT=$(awk -F'\t' '$4=="NP_EFFECT" {printf "%s%s", s, $1; s=","}' "$PD/np-effect.tsv")  # B CONNECTED→A TIMEOUT만"
+    echo "NO_CLAIM_UPSTREAM=$(awk -F'\t' '$4=="NO_CLAIM_UPSTREAM" {printf "%s%s", s, $1; s=","}' "$PD/np-effect.tsv")  # B부터 막힘(SG 등) — 정책 효과 미주장"
     echo "STAGE_C_REF=$(st STAGE_C_REF)"; echo "T3_REF=$(st T3_REF)"; echo "DB_WINDOW_REF=$(st DB_WINDOW_REF)"
   } >"$PD/handoff.txt"
   cat "$PD/handoff.txt"
