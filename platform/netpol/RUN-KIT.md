@@ -113,7 +113,7 @@ bash platform/netpol/netpol-run.sh cleanup
 | stage-a | 정책 집합 = 이 시험의 5개, 00 spec = `podSelector {}` + Ingress·Egress, 허용 규칙 없음, 정책 원본 YAML 수집 | 일치·수집 성공 | rc 42 / 원본 실패는 rc 11(EVIDENCE_INCOMPLETE) |
 | stage-a (A) | P1, (P2), P3 | CONNECTED / OK | rc 50 |
 | stage-a (A) | N1·N5 | TIMEOUT(`NP_EFFECT`) | CONNECTED면 rc 50, REFUSED·UNREACHABLE·TOOL_ERROR·EXEC_TIMEOUT이면 rc 51 |
-| stage-a (A) | N2·N3·N4 | B CONNECTED였으면 TIMEOUT(`NP_EFFECT`). B부터 막혔으면 기록만(`NO_CLAIM_UPSTREAM`) | A CONNECTED면 rc 50. B CONNECTED였는데 A가 REFUSED 등이면 rc 51 |
+| stage-a (A) | N2·N3·N4 | B CONNECTED였으면 TIMEOUT(`NP_EFFECT`). B부터 막혔으면 기록만(`NO_CLAIM_UPSTREAM`) | A CONNECTED면 rc 50. B CONNECTED였는데 A가 REFUSED 등이면 rc 51. B 또는 A가 TOOL_ERROR·EXEC_TIMEOUT·결과 없음이면 rc 51(수집 실패는 미주장이 아님) |
 | stage-a | R1 `https://<route>/` (실행 위치=클러스터 밖) | **TLS 검증 성공** + `R1_EXPECTED_CODES` | rc 50. `-k` 재시도 없음 |
 | stage-a | R2 `Admitted` | 조회 rc 0 + `True` | rc 50 |
 | cleanup | OWNED 자원만 UID 대조 삭제, 00~03 UID·spec 유지, 최종 목록 = 남겨야 할 정책뿐 | 일치 | rc 60 HOLD(지우지 않음, 재시도 가능) / 부분 정책이면 rc 61 |
@@ -179,7 +179,7 @@ kubeconfig·토큰·Pull Secret 원문은 남기지 않는다(`whoami` 이름만
 
 ## 8. 시험 범위와 실행 전 조건
 
-- **MOCK:** `bash platform/netpol/tests/netpol-run-mock.sh` → 86/86 PASS (2026-10-16, Windows Git Bash, 가짜 `oc`·`curl`). 단계 순서·재실행 거부·판정 분기·쓰기 0(precheck)·승인 입력/kit/대상 변조 STOP·부분 생성/부분 정책 기록·UNCONFIRMED 미삭제·cleanup 재시도·TLS 실패·R2 rc·증적 실패·exec 시간 초과를 본다. **실제 클러스터·OVN·router 동작 PASS가 아니다.**
+- **MOCK:** `bash platform/netpol/tests/netpol-run-mock.sh` → 90/90 PASS (2026-10-16, Windows Git Bash, 가짜 `oc`·`curl`). 단계 순서·재실행 거부·판정 분기·쓰기 0(precheck)·승인 입력/kit/대상 변조 STOP·부분 생성/부분 정책 기록·UNCONFIRMED 미삭제·cleanup 재시도·TLS 실패·R2 rc·증적 실패·exec 시간 초과·N2~N4 수집 실패 INCONCLUSIVE를 본다. **실제 클러스터·OVN·router 동작 PASS가 아니다.**
 - **실행 전 조건(없는 입력을 합성하지 않음):** 시험 이미지의 필수 도구·SCC 적합성과 승인 digest, N3 실제 대상과 안전성, D22 선택, IF-18 수용, #37 단계 C·T3·db01 창의 유효성, 작업창 시각 배정. 별도 Namespace나 DB 창 연장은 이 키트로 승인되지 않는다.
 - **O2:** httpd-24 기본 응답 코드(빈 문서 루트면 200이 아닐 수 있음). 실제 확인 뒤 `R1_EXPECTED_CODES`를 승인 입력으로 정한다.
 - **O4:** cleanup의 UID 대조와 삭제 사이에는 짧은 경합 구간이 있다(`oc delete`에 UID 조건 옵션 없음). 이 NS의 다른 writer가 없다는 시작 조건으로 막는다.

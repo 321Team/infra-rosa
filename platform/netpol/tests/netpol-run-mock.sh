@@ -116,6 +116,9 @@ case "$a" in
     printf '%s %s %s\n' "$pod" "$ip" "$port" >>"$STATE/exec-targets"
     [[ "$SCENARIO" == exec_hang && "$pod" == tcp-control && -f "$STATE/obj-networkpolicy-fds-platform-default-deny" ]] && { sleep 10; exit 0; }
     pol=0; [[ -f "$STATE/obj-networkpolicy-fds-platform-default-deny" ]] && pol=1
+    if [[ "$ip:$port" == 10.1.93.55:22 ]] && { [[ "$SCENARIO" == b_n2_toolerror && $pol == 0 ]] || [[ "$SCENARIO" == a_n2_toolerror && $pol == 1 ]]; }; then
+      echo 'error: unable to upgrade connection: container not found' >&2; exit 1
+    fi
     r=124
     if [[ "$ip:$port" == 10.1.93.55:5432 ]]; then
       if (( pol == 0 )); then r=0; [[ "$SCENARIO" == b_p1_timeout && "$pod" == tcp-allowed ]] && r=124
@@ -284,6 +287,12 @@ check "stage-a: B부터 막힌 N3가 A에서 REFUSED → 미주장 기록(통과
 assert "stage-a: 그 N3는 NO_CLAIM_UPSTREAM" bash -c 'grep -qx "N3	TIMEOUT	REFUSED	NO_CLAIM_UPSTREAM" "$RUN_DIR/stage-a/np-effect.tsv"'
 new_case a7 a_n4_refused; to_stage_a
 check "stage-a: B CONNECTED였던 N4가 A에서 REFUSED → 판정 불가" 51 bash "$SCRIPT" stage-a
+new_case a12 a_n2_toolerror; to_stage_a
+check "stage-a: B=TIMEOUT·A=TOOL_ERROR(N2) → 미주장이 아니라 판정 불가" 51 bash "$SCRIPT" stage-a
+assert "stage-a: 그 N2는 INCONCLUSIVE" bash -c 'grep -q "^N2	TIMEOUT	TOOL_ERROR	INCONCLUSIVE$" "$RUN_DIR/stage-a/np-effect.tsv"'
+new_case a13 b_n2_toolerror; to_stage_a
+check "stage-a: B=TOOL_ERROR·A=TIMEOUT(N2) → B 기준 미확인, 판정 불가" 51 bash "$SCRIPT" stage-a
+assert "stage-a: 그 N2는 INCONCLUSIVE" bash -c 'grep -q "^N2	TOOL_ERROR	TIMEOUT	INCONCLUSIVE$" "$RUN_DIR/stage-a/np-effect.tsv"'
 new_case a8 exec_hang; to_stage_a; export NETPOL_EXEC_TIMEOUT_S=2
 check "stage-a: oc exec 바깥 시간 초과 → TCP TIMEOUT과 구분(판정 불가)" 51 bash "$SCRIPT" stage-a
 assert "stage-a: N1은 EXEC_TIMEOUT으로 기록" bash -c 'grep -q "^A	N1	.*	EXEC_TIMEOUT$" "$RUN_DIR/stage-a/results.tsv"'

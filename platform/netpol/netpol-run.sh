@@ -492,7 +492,10 @@ if [[ "$PHASE" == stage-a ]]; then
   : >"$PD/np-effect.tsv"
   for id in N1 N2 N3 N4 N5; do
     b="$(bverdict "$id")"; a="$(verdict "$id")"
-    if [[ "$a" == CONNECTED ]]; then claim=FAIL_OPEN; FAILS+=("$id:CONNECTED(정책 후 열림)")
+    # 수집 실패(TOOL_ERROR·EXEC_TIMEOUT·결과 없음)는 "주장 안 함"이 아니라 판정 불가다(PR41 리뷰 2026-10-16 11:00).
+    if [[ ! "$b" =~ ^(CONNECTED|TIMEOUT|REFUSED|UNREACHABLE)$ || ! "$a" =~ ^(CONNECTED|TIMEOUT|REFUSED|UNREACHABLE)$ ]]; then
+      claim=INCONCLUSIVE; INCONCL+=("$id:수집 실패 B=${b:-none} A=${a:-none}")
+    elif [[ "$a" == CONNECTED ]]; then claim=FAIL_OPEN; FAILS+=("$id:CONNECTED(정책 후 열림)")
     elif [[ "$b" == CONNECTED ]]; then
       if [[ "$a" == TIMEOUT ]]; then claim=NP_EFFECT; else claim=INCONCLUSIVE; INCONCL+=("$id:$a"); fi
     else claim=NO_CLAIM_UPSTREAM; fi
