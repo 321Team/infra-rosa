@@ -26,6 +26,9 @@ STEPS_FILE="${1:?usage: bootstrap-session.sh <steps.sh>}"
 # `rosa list users` 표 머리글 정규식. **실제 ROSA CLI 1.2.53 출력으로 확정 전에는 실행본 아님.**
 # 머리글이 맞지 않으면(형식 불명) 빈 매칭을 '부재'로 보지 않고 UNKNOWN 으로 처리한다.
 ROSA_USERS_HEADER_RE="${ROSA_USERS_HEADER_RE:-^ID[[:space:]]+GROUPS[[:space:]]*$}"
+# 본문 각 행의 형식(PR#40 리뷰 R5). 머리글이 맞아도 본문 한 행이라도 이 형식이 아니면 UNKNOWN(부재로 승격하지 않음).
+# [AFTER-CREATE] 실제 `rosa list users` 행 형식·그룹 이름으로 확정.
+ROSA_USERS_ROW_RE="${ROSA_USERS_ROW_RE:-^[a-z0-9][a-z0-9._@-]*[[:space:]]+(cluster-admins|dedicated-admins)(,(cluster-admins|dedicated-admins))*[[:space:]]*$}"
 
 umask 077
 mkdir -p "$WORKDIR"
@@ -50,7 +53,12 @@ check_mgmt_grant() {
   if ! head -n 1 "$out" | grep -Eq "$ROSA_USERS_HEADER_RE"; then
     log "MGMT_FORMAT_UNKNOWN (머리글 불일치)"; echo UNKNOWN; return
   fi
-  if tail -n +2 "$out" | awk -v u="$U" '$1 == u' | grep -q 'cluster-admin'; then
+  # 본문 전 행 형식 검사 — 깨진 본문(예: 오류 HTML)이나 그룹 없는 행은 UNKNOWN
+  if ! tail -n +2 "$out" | awk -v re="$ROSA_USERS_ROW_RE" 'NF == 0 { next } $0 !~ re { bad = 1 } END { exit bad }'; then
+    log "MGMT_FORMAT_UNKNOWN (본문 행 형식 불일치)"; echo UNKNOWN; return
+  fi
+  # 대상 사용자 행의 그룹 목록에 cluster-admins 가 정확히 있는지(부분 문자열 아님)
+  if tail -n +2 "$out" | awk -v u="$U" '$1 == u { n = split($2, g, ","); for (i = 1; i <= n; i++) if (g[i] == "cluster-admins") f = 1 } END { exit !f }'; then
     echo PRESENT
   else
     echo ABSENT
@@ -89,14 +97,18 @@ verify_revoked() {
 
 cleanup() {
   local rc=$?
-  trap - EXIT INT TERM ERR
+  trap - EXIT ERR
+  # 회수 중 Ctrl+C·TERM 은 무시한다(PR#37 이재환 리뷰 #1). 무시 상태는 자식(rosa/oc)에게도 상속되어
+  # revoke·회수 확인이 끝까지 간다. 강제 종료(kill -9)·세션 유실은 막을 수 없으므로 두 번째 관리 세션에서 수동 revoke.
+  trap '' INT TERM
   [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null || true
-  log "CLEANUP_START rc=$rc grant_attempted=$grant_attempted"
+  log "CLEANUP_START rc=$rc grant_attempted=$grant_attempted (회수 중 Ctrl+C 무시 — 멈춰야 하면 두 번째 관리 세션에서 수동 revoke)"
+  local verified=0
   if [[ "$grant_attempted" == 1 ]]; then
     if rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y; then
       log "REVOKE_CMD_OK"
       if verify_revoked; then
-        log "REVOKE_VERIFIED"
+        log "REVOKE_VERIFIED"; verified=1
       else
         log "CLEANUP_REQUIRED: 회수 확인 실패/시간 초과"
         rc=1
@@ -106,13 +118,61 @@ cleanup() {
       rc=1
     fi
   fi
-  if ! rm -f -- "$WORKDIR/t"; then
+  # SA token 원문(t)과 SA 전용 kubeconfig 는 성공·실패와 관계없이 항상 지운다(PR#40 보완 1).
+  # 하영 세션 kubeconfig 는 남긴다 — post-revoke-check.sh 의 D-11b(회수 전 세션) 판정 뒤 그 스크립트가 지운다.
+  if ! rm -f -- "$WORKDIR/t" "$WORKDIR/sa.kubeconfig"; then
     log "CLEANUP_REQUIRED: token 임시 파일 삭제 실패"
     rc=1
+  fi
+  if [[ -e "$WORKDIR/t" || -e "$WORKDIR/sa.kubeconfig" ]]; then
+    log "CLEANUP_REQUIRED: token 임시 파일이 남아 있음"
+    rc=1
+  fi
+  # 완료 receipt(PR#40 리뷰 R3): 회수 확인 + 단계 정상(rc0) 또는 정책 승인 대기(rc3)일 때만 발행.
+  # post-revoke-check.sh 는 이 receipt 가 없거나 값·해시가 다르면 판정 전에 STOP 한다. token 원문은 넣지 않는다.
+  if [[ $verified == 1 && ( $rc == 0 || $rc == 3 ) && -n "${EV:-}" && -d "${EV:-/nonexistent}" ]]; then
+    if ! issue_receipt "$rc"; then log "RECEIPT_FAILED — post-revoke 판정 불가"; rc=1; fi
   fi
   # 회수 성공이어도 원래 실패/취소 rc 는 보존한다(0 으로 덮지 않음).
   log "CLEANUP_END final_rc=$rc"
   exit "$rc"
+}
+
+# 해시는 rc·형식을 검사한 뒤에만 낸다(리뷰 5530751510 R3). 실패를 빈 문자열로 넘기지 않는다.
+sha_of() {
+  local out
+  out=$(sha256sum -- "$1") || return 1
+  out=${out%% *}
+  [[ "$out" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$out"
+}
+issue_receipt() {
+  local status=COMPLETE f now h_old h_tgt h_uid h_inv h_rev tmp="$EV/99-receipt.env.tmp"
+  [[ $1 == 3 ]] && status=POLICY_PENDING
+  for f in "$KUBECONFIG" "$EV/00-target.env" "$EV/05-ns-uid.txt" "$EV/10b-inventory/SHA256SUMS" "$EV/10b-path-review.tsv"; do
+    [[ -s "$f" ]] || { log "RECEIPT: 필요한 파일 없음($f)"; return 1; }
+  done
+  # 모든 값을 먼저 계산·검증한다. 하나라도 실패하면 receipt 를 만들지 않는다.
+  h_old=$(sha_of "$KUBECONFIG")                     || { log "RECEIPT: 회수 전 세션 해시 실패"; return 1; }
+  h_tgt=$(sha_of "$EV/00-target.env")              || { log "RECEIPT: target 해시 실패"; return 1; }
+  h_uid=$(sha_of "$EV/05-ns-uid.txt")              || { log "RECEIPT: namespace UID 해시 실패"; return 1; }
+  h_inv=$(sha_of "$EV/10b-inventory/SHA256SUMS")   || { log "RECEIPT: 인벤토리 SHA256SUMS 해시 실패"; return 1; }
+  h_rev=$(sha_of "$EV/10b-path-review.tsv")        || { log "RECEIPT: path-review 해시 실패"; return 1; }
+  now=$(date '+%FT%T%z')                            || return 1
+  # 임시 파일에 완성본을 쓴 뒤 한 번에 확정(rename). 쓰기·확정 실패 시 불완전 파일을 남기지 않는다.
+  # 각 쓰기를 && 로 잇는다 — { a; b; } 는 마지막 명령의 rc 만 돌려주므로 중간 실패가 덮인다(리뷰 5542174606 R3, 이권욱 제시안).
+  if ! {
+    printf 'RECEIPT_VERSION=1\nSTATUS=%s\nFINAL_RC=%s\n' "$status" "$1" &&
+    printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nREVOKE_VERIFIED_AT=%s\n' "$CLUSTER_ID" "$API_URL" "$U" "$now" &&
+    printf 'OLD_KUBECONFIG_SHA256=%s\nTARGET_SHA256=%s\nNS_UID_SHA256=%s\n' "$h_old" "$h_tgt" "$h_uid" &&
+    printf 'INVENTORY_SUMS_SHA256=%s\nPATH_REVIEW_SHA256=%s\n' "$h_inv" "$h_rev"
+  } >"$tmp"; then
+    rm -f -- "$tmp"; log "RECEIPT: 쓰기 실패"; return 1
+  fi
+  if ! mv -f -- "$tmp" "$EV/99-receipt.env"; then
+    rm -f -- "$tmp" "$EV/99-receipt.env"; log "RECEIPT: 확정(rename) 실패"; return 1
+  fi
+  log "RECEIPT_ISSUED status=$status $EV/99-receipt.env"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
