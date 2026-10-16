@@ -54,7 +54,7 @@ TEST-PLAN C1은 `10.20.0.0/16`을 기준으로 했지만, 이 키트는 단계 C
 | `APPROVED_RENDER_SUMS_SHA256` | 클러스터 단계 | 0번 리뷰 승인값 | 실행 안 함 |
 | `WORKER_CIDR` | precheck | 기본 `10.20.10.0/24`(private_a) | — |
 | `STAGE_C_REF`, `T3_REF`, `DB_WINDOW_REF` | stage-b | #37/#11의 재환 님 기록 댓글 URL | **stage-b 시작 거부(rc 30)** |
-| `N3_TARGET` | stage-b | 승인 밖 On-Prem 대상 `<ip>:<port>`(후보 `10.1.93.50:443`, 질문 Q3) | 시작 거부(rc 2) |
+| `N3_TARGET` | stage-b | 승인 밖 On-Prem 대상 `<ip>:<port>`. 후보 `10.1.93.50:443`(edge01)은 Relay SG에서 먼저 막혀 `NO_CLAIM_UPSTREAM`으로 기록됨(#37 6205733242 Q3). 대상 확정은 재환·권욱 | 시작 거부(rc 2) |
 | `N2_PORT`, `N4_TARGET` | stage-b | 기본 `22`, `1.1.1.1:443` | — |
 | `R1_EXPECTED_CODES` | stage-a | 기본 `200`. httpd-24 기본 페이지 응답 코드는 실제 확인 필요(열린 항목 O2) | — |
 
