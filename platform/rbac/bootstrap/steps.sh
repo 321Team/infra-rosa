@@ -84,15 +84,19 @@ run_steps() {
   oc get groups -o yaml >"$EV/04-groups.yaml"
   # #4 Handoff(#38 인계표) 1번 OpenShift cluster UUID·3번 노드 Ready. 회수 뒤 namespace admin 으로는 읽을 수 없으므로
   # cluster-admin 이 있는 지금 읽는다. 읽기 실패·값 없음이면 STOP(→ 회수). 판정(3/3 Ready 등)은 증적 리뷰에서 한다.
-  oc get clusterversion version -o json >"$EV/04-clusterversion.json"
-  oc get nodes -o json >"$EV/04-nodes.json"
-  oc get nodes -o wide >"$EV/04-nodes-wide.txt"
+  oc get clusterversion version -o json >"$EV/04-clusterversion.json" || { log "STOP: clusterversion 조회 실패"; return 1; }
+  oc get nodes -o json >"$EV/04-nodes.json" || { log "STOP: nodes 조회 실패"; return 1; }
+  oc get nodes -o wide >"$EV/04-nodes-wide.txt" || { log "STOP: nodes(wide) 조회 실패"; return 1; }
   # 값은 변수에 먼저 받는다 — printf 인자 안의 $(...) 실패는 set -e 로 멈추지 않기 때문.
   local cv_uuid cv_ver n_count n_rows
-  cv_uuid=$(jq -er '.spec.clusterID | select(type == "string" and length > 0)' "$EV/04-clusterversion.json")
-  cv_ver=$(jq -er '.status.desired.version | select(type == "string" and length > 0)' "$EV/04-clusterversion.json")
-  n_count=$(jq -er '.items | length | select(. > 0)' "$EV/04-nodes.json")
-  n_rows=$(jq -er '.items[] | "NODE\t\(.metadata.name)\tReady=\([.status.conditions[]? | select(.type == "Ready") | .status][0] // "UNKNOWN")"' "$EV/04-nodes.json")
+  cv_uuid=$(jq -er '.spec.clusterID | select(type == "string" and length > 0)' "$EV/04-clusterversion.json") \
+    || { log "STOP: cluster UUID 없음/판독 실패"; return 1; }
+  cv_ver=$(jq -er '.status.desired.version | select(type == "string" and length > 0)' "$EV/04-clusterversion.json") \
+    || { log "STOP: cluster version 없음/판독 실패"; return 1; }
+  n_count=$(jq -er '.items | length | select(. > 0)' "$EV/04-nodes.json") \
+    || { log "STOP: 노드 0개/판독 실패"; return 1; }
+  n_rows=$(jq -er '.items[] | "NODE\t\(.metadata.name)\tReady=\([.status.conditions[]? | select(.type == "Ready") | .status][0] // "UNKNOWN")"' "$EV/04-nodes.json") \
+    || { log "STOP: 노드 행 판독 실패"; return 1; }
   printf 'OPENSHIFT_CLUSTER_UUID=%s\nCLUSTER_VERSION=%s\nNODE_COUNT=%s\n%s\n' \
     "$cv_uuid" "$cv_ver" "$n_count" "$n_rows" >"$EV/04-handoff-1-3.txt"
   r=0; oc get clusterrolebinding self-provisioners -o yaml >"$EV/04-self-provisioners.yaml" 2>&1 || r=$?
