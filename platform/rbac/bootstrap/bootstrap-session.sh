@@ -29,6 +29,13 @@ ROSA_USERS_HEADER_RE="${ROSA_USERS_HEADER_RE:-^ID[[:space:]]+GROUPS[[:space:]]*$
 # 본문 각 행의 형식(PR#40 리뷰 R5). 머리글이 맞아도 본문 한 행이라도 이 형식이 아니면 UNKNOWN(부재로 승격하지 않음).
 # [AFTER-CREATE] 실제 `rosa list users` 행 형식·그룹 이름으로 확정.
 ROSA_USERS_ROW_RE="${ROSA_USERS_ROW_RE:-^[a-z0-9][a-z0-9._@-]*[[:space:]]+(cluster-admins|dedicated-admins)(,(cluster-admins|dedicated-admins))*[[:space:]]*$}"
+# 빈 목록 출력(#5 A단계 실측, fds-rosa-hcp, 2026-10-18): 머리글 없이 stdout 에 아래 1줄만 나오고 rc0.
+#   INFO: There are no users configured for cluster '<CLUSTER_ID>'
+# rc0 + stderr 비어 있음 + stdout 정확히 이 1줄(이 회차 CLUSTER_ID)일 때만 부재로 본다. 다른 ID·추가 줄·stderr 는 UNKNOWN.
+ROSA_USERS_EMPTY_LINE="INFO: There are no users configured for cluster '$CLUSTER_ID'"
+users_list_empty() { # out err
+  [[ ! -s "$2" && "$(wc -l <"$1")" -eq 1 && "$(<"$1")" == "$ROSA_USERS_EMPTY_LINE" ]]
+}
 
 umask 077
 mkdir -p "$WORKDIR"
@@ -43,12 +50,15 @@ watchdog_pid=""
 log() { printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*" >&2; }
 
 # 관리면 grant 확인 → 표준출력: ABSENT | PRESENT | UNKNOWN
-#   ABSENT 는 rc0 + 머리글 형식 일치 + 대상 사용자 행에 cluster-admin 이 없을 때만.
+#   ABSENT 는 rc0 + (실측 빈 목록 1줄 | 머리글 형식 일치 + 대상 사용자 행에 cluster-admin 없음)일 때만.
 check_mgmt_grant() {
   local out="$WORKDIR/verify-users.$1.out" err="$WORKDIR/verify-users.$1.err" rc=0
   rosa list users -c "$CLUSTER_ID" >"$out" 2>"$err" || rc=$?
   if [[ $rc -ne 0 ]]; then
     log "MGMT_QUERY_FAILED rc=$rc"; echo UNKNOWN; return
+  fi
+  if users_list_empty "$out" "$err"; then
+    echo ABSENT; return
   fi
   if ! head -n 1 "$out" | grep -Eq "$ROSA_USERS_HEADER_RE"; then
     log "MGMT_FORMAT_UNKNOWN (머리글 불일치)"; echo UNKNOWN; return

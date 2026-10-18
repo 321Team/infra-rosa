@@ -86,10 +86,13 @@ rosa list users -c <id>
 
 | 항목 | 위치 | 확인 방법 / 다르면 |
 |---|---|---|
-| `rosa list users` 머리글 | `ROSA_USERS_HEADER_RE` (래퍼·post) | 생성 후 `rosa list users -c <id>` 실제 출력. 다르면 정규식을 고치고 다시 리뷰받기 전에는 실행하지 않음(그 전에는 UNKNOWN → rc1) |
-| `rosa describe` 의 `api.url` 실제 표기 | 래퍼 F1 결속·`steps.sh` ③ server 비교 | 생성 후 표기(포트·끝 `/`)를 #5에 기록하고 `API_URL`을 그 값 그대로 사용. `oc whoami --show-server` 표기와 다르면 ③에서 STOP → 기록 후 재검토 |
-| `rosa revoke user ... -y` 옵션 | 래퍼 cleanup | `rosa revoke user --help` |
-| htpasswd IdP 개수 제한·`--from-file` | ① | 기존 htpasswd IdP가 있으면 STOP |
+| `rosa list users` 빈 목록 | `ROSA_USERS_EMPTY_LINE` (래퍼·post) | **A단계 실측(2026-10-18)**: 머리글 없이 stdout 1줄 `INFO: There are no users configured for cluster '<id>'`, rc0, stderr 없음. 정확히 이 1줄(이 회차 ID)일 때만 부재. 다른 ID·추가 줄·stderr·rc≠0 은 UNKNOWN |
+| `rosa list users` 머리글(사용자 있을 때) | `ROSA_USERS_HEADER_RE` (래퍼·post) | grant 전에는 볼 수 없음. ③에서 grant 상태 원문을 `03-granted-users.out`에 기록만 함 → 첫 회차 증적으로 정규식 확정·리뷰. 회수 뒤 판정은 빈 목록 규칙을 쓰므로 머리글이 달라도 회수 확인은 막히지 않음(수렴 대기 중 PRESENT 를 못 읽으면 UNKNOWN → 재조회) |
+| `rosa describe` 의 `api.url` 실제 표기 | 래퍼 F1 결속·`steps.sh` ③ server 비교 | **A단계 실측**: `https://api.fds-rosa-hcp.khht.p3.openshiftapps.com:443`. `API_URL`은 이 값 그대로. `oc whoami --show-server` 표기와 다르면 ③에서 STOP → 기록 후 재검토 |
+| `rosa revoke user ... -y` 옵션 | 래퍼 cleanup | **A단계 실측**: `-y, --yes` 있음. `rosa grant user cluster-admin` 형식도 help 예시와 일치 |
+| htpasswd IdP 개수 제한·`--from-file` | ① | **A단계 실측**: 기존 IdP 0개, `--from-file` 있음. 실행 직전 `rosa list idps`를 다시 보고 htpasswd 가 있으면 STOP |
+| OpenShift cluster UUID·노드 Ready (#4 Handoff 1·3번) | `steps.sh` ④ `04-handoff-1-3.txt` | 회수 뒤 namespace admin 으로는 `clusterversion`·`nodes` 를 읽을 수 없어 cluster-admin 이 있는 ④에서 읽음. 읽기 실패·값 없음이면 STOP(→ 회수). UUID 는 `rosa describe` `external_id`(A단계 `37eecf03-…`)와 교차 확인 |
+| CloudShell `oc` | 실행 전 준비 | **A단계 실측**: 설치 안 됨. 실행 전에 설치하고 `oc version --client` 기록 |
 | grant/revoke 반영 지연 | 래퍼 `VERIFY_TRIES`·`VERIFY_INTERVAL` | 기본 60초 × 10회. 넘으면 CLEANUP_REQUIRED |
 | `cluster-admins` 그룹·binding 실제 이름, `dedicated-admins` 유무 | `steps.sh` ④·⑩-b 분류 | 다르면 ⑩-b가 UNEXPECTED로 STOP → 정의 갱신·리뷰 |
 | self-provisioner 등 플랫폼 기본 binding | ④·⑩-b | `system:authenticated(:oauth)` 대상은 PLATFORM_DEFAULT로 기록만, 수정하지 않음 |

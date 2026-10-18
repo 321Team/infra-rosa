@@ -49,7 +49,10 @@ case "${MOCK_USERS_MODE:-header}" in
   admin)        echo "ID        GROUPS"; echo "hayeoung  cluster-admins" ;;
   broken)       echo "<html>bad</html>" ;;
   headerbroken) echo "ID        GROUPS"; echo "<html>gateway timeout</html>" ;;
+  noneinfo)     echo "INFO: There are no users configured for cluster '${MOCK_EMPTY_ID:-mock-id}'" ;;   # #5 A단계 실측 빈 목록
 esac
+[[ -n "${MOCK_USERS_ERR:-}" ]] && echo "$MOCK_USERS_ERR" >&2
+exit 0
 EOF
 chmod +x "$T/bin/oc" "$T/bin/rosa"
 # 실패 주입용 sha256sum(post 실행에만 쓰임). 지정 경로에서만 실패하고 그 밖에는 진짜 명령으로 넘긴다(리뷰 5530751510 R3)
@@ -169,4 +172,8 @@ case_ P27_receipt_empty_hash        1 RC_EMPTY_OLD=1
 case_ P28_receipt_malformed_hash    1 RC_BAD_HASH=1
 case_ P29_ns_uid_file_swapped       1 TAMPER_UID=1 MOCK_UID_MISMATCH=1    # 수정 전: 원본·현재 UID 를 같이 바꾸면 PASS 했음
 case_ P30_receipt_without_uid_hash  1 RC_NO_UID=1
+# #5 A단계 실측 빈 목록(INFO 1줄): 이 클러스터 ID·stderr 없음일 때만 부재
+case_ P31_mgmt_empty_info_line      0 MOCK_USERS_MODE=noneinfo
+case_ P32_mgmt_empty_info_other_id  1 MOCK_USERS_MODE=noneinfo MOCK_EMPTY_ID=other-id
+case_ P33_mgmt_empty_info_stderr    1 MOCK_USERS_MODE=noneinfo MOCK_USERS_ERR='WARN: token expiring'
 exit "$fail"
