@@ -43,13 +43,15 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
    CLUSTER_ID=<id>
    API_URL=$(rosa describe cluster -c "$CLUSTER_ID" -o json | jq -er '.api.url'); echo "$API_URL"
    CLUSTER_ID="$CLUSTER_ID" API_URL="$API_URL" DEADLINE_EPOCH=$(date -d '+90 min' +%s) \
-     KIT_DIR="$PWD" ./bootstrap-session.sh steps.sh 2>&1 | tee ~/rosa-idp/bootstrap.log
+     KIT_DIR="$PWD" ./bootstrap-session.sh steps.sh 2>&1 | tee -i ~/rosa-idp/bootstrap.log
    pipeline_status=("${PIPESTATUS[@]}")
    wrapper_rc=${pipeline_status[0]}
    log_rc=${pipeline_status[1]}
    printf 'wrapper_rc=%s log_rc=%s\n' "$wrapper_rc" "$log_rc"
    ```
    - `pipeline_status=…` 줄은 **파이프 바로 다음 줄**이어야 합니다(사이에 다른 명령이 있으면 값이 사라짐). `| tee`만 쓰면 화면의 rc는 tee의 값이라 래퍼 실패가 숨겨집니다(PR#40 리뷰 R4).
+   - `tee -i`: Ctrl+C 로 화면 기록(tee)이 먼저 죽지 않게 합니다. 래퍼도 화면 파이프가 끊기면(SIGPIPE) 바로 회수로 가고, 회수 중 출력 실패로 멈추지 않습니다. 진행 기록은 `~/rosa-idp/session-events.log`에도 남습니다(#5 2회차 6262238397).
+   - **비밀번호는 `Password:`가 나오면 바로 입력합니다.** 로그인 뒤 래퍼가 `oc auth can-i '*' '*' --all-namespaces`=yes가 될 때까지 스스로 기다립니다(기본 10초×30회, 증적 `03-grant-wait.txt`). 시간 초과면 첫 단계 전에 STOP·회수합니다. 다른 탭에서 확인하거나 Ctrl+C를 누를 필요가 없습니다.
    - 회수(revoke)가 시작되면 **Ctrl+C는 무시됩니다**. 회수와 회수 확인(최대 `VERIFY_TRIES×VERIFY_INTERVAL`, 기본 10분)을 끝까지 하기 위해서입니다. 그래도 멈춰야 하면 두 번째 관리 세션에서 수동 revoke합니다(아래 실행 카드).
    - **`log_rc`가 0이 아니면** 로그가 온전히 저장되지 않은 것입니다. 증적이 불완전하므로 STOP하고 #5에 보고합니다.
    - **`wrapper_rc=0` 그리고 `log_rc=0`** → 3으로 갑니다(완료, receipt `STATUS=COMPLETE`).

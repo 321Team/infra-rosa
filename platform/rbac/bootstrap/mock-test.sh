@@ -17,10 +17,11 @@ case "$1 $2" in
       broken) echo '<html>bad gateway</html>' ;;
     esac
     exit "${MOCK_DESCRIBE_RC:-0}" ;;
-  "grant user")  exit 0 ;;
+  "grant user")  [[ "${MOCK_GRANT_NOPROP:-0}" == 1 ]] || : >"$MOCK_LOG.granted"; exit 0 ;;   # 55: 반영 안 됨 주입
   "revoke user")
     # 29: 실제 Ctrl+C 처럼 자기 프로세스 그룹 전체(래퍼+rosa)에 INT. 회수 중 무시가 상속되면 rosa 도 끝까지 간다.
     if [[ "${MOCK_INT_DURING_REVOKE:-0}" == 1 ]]; then kill -INT 0; sleep 0.3; echo "MOCK: revoke survived INT" >>"$MOCK_LOG"; fi
+    [[ "${MOCK_REVOKE_RC:-0}" == 0 ]] && rm -f "$MOCK_LOG.granted"
     exit "${MOCK_REVOKE_RC:-0}" ;;
   "list users")
     case "${MOCK_USERS_MODE:-std}" in
@@ -89,7 +90,15 @@ if [[ "$1 $2" == "auth can-i" && "$*" == *"--as=hayeoung"* ]]; then
   esac
 fi
 if [[ "$1 $2" == "auth can-i" ]]; then
-  rc="${MOCK_CANI_RC:-1}"
+  # 기본: grant 상태 파일이 있으면 yes(반영됨), 없으면 no. MOCK_CANI_RC 를 주면 그 값으로 고정(회수 확인 실패 주입용)
+  # 58: MOCK_GW_YES_RC42 = grant 상태에서 stdout yes 인데 rc42·stderr 오류(R2 반례)
+  # 59: MOCK_GRANT_DELAY=n = grant 뒤 처음 n번은 no(반영 지연) → 그다음 yes
+  if [[ -n "${MOCK_CANI_RC:-}" ]]; then rc=$MOCK_CANI_RC
+  elif [[ -e "$MOCK_LOG.granted" ]]; then
+    [[ "${MOCK_GW_YES_RC42:-0}" == 1 ]] && { echo yes; echo "mock: server error" >&2; exit 42; }
+    n=$(( $(cat "$MOCK_LOG.cani" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$MOCK_LOG.cani"
+    rc=0; (( n <= ${MOCK_GRANT_DELAY:-0} )) && rc=1
+  else rc=1; fi
   case "$rc" in 0) echo yes ;; 1) echo no ;; esac
   [[ -n "${MOCK_CANI_ERR:-}" ]] && echo "$MOCK_CANI_ERR" >&2
   exit "$rc"
@@ -190,7 +199,7 @@ run_case() { # name steps expect_rc [env...]
   fi
   "${pre[@]}" env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" \
       CLUSTER_ID=mock-id API_URL=https://api.mock:443 DEADLINE_EPOCH="$dl" \
-      VERIFY_TRIES=2 VERIFY_INTERVAL=0 MANIFEST_DIR="$HERE/../manifests" KIT_DIR="$HERE" POLICY_FILE="$T/policy.tsv" "$@" \
+      VERIFY_TRIES=2 VERIFY_INTERVAL=0 GRANT_WAIT_INTERVAL=0 MANIFEST_DIR="$HERE/../manifests" KIT_DIR="$HERE" POLICY_FILE="$T/policy.tsv" "$@" \
       bash "${WRAPPER:-$HERE/bootstrap-session.sh}" "$T/$steps.sh" 2>"$T/$name.err"
   local rc=$?
   local after; after=$(grep -c '_AFTER_' "$log" || true)
@@ -250,8 +259,9 @@ run_case 28_inventory_unexpected template 1 MOCK_TOKEN=1 MOCK_INV_UNEXPECTED=1  
 unset FORBID
 # PR#37 리뷰(이재환 #1): 회수(revoke) 도중 Ctrl+C(프로세스 그룹 INT)가 와도 회수·확인을 끝까지 하고 기록을 남긴다
 USE_SETSID=1 REQUIRE_ERR='REVOKE_VERIFIED' run_case 29_ctrl_c_during_revoke normal 0 MOCK_INT_DURING_REVOKE=1
-# 대조(29b): 회수 중 무시(trap '' INT TERM)를 뺀 사본은 같은 상황에서 INT 로 죽어야 한다 — 29 가 의미 있는 시험인지 확인
-grep -v "^  trap '' INT TERM$" "$HERE/bootstrap-session.sh" >"$T/wrapper-nofix.sh"
+# 대조(29b): 회수 중 INT·TERM 무시를 뺀 사본(PIPE 무시는 남김)은 같은 상황에서 INT 로 죽어야 한다 — 29 가 의미 있는 시험인지 확인
+sed "s/^  trap '' INT TERM PIPE\$/  trap '' PIPE/" "$HERE/bootstrap-session.sh" >"$T/wrapper-nofix.sh"
+cmp -s "$HERE/bootstrap-session.sh" "$T/wrapper-nofix.sh" && { echo "FAIL: 29b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 WRAPPER="$T/wrapper-nofix.sh" USE_SETSID=1 FORBID_ERR='REVOKE_VERIFIED' run_case 29b_without_fix_dies normal nonzero MOCK_INT_DURING_REVOKE=1
 
 # PR#40 보완 5: RBAC 이 아닌 403(quota)을 '정상 거부'로 보지 않음 → D-01 에서 STOP
@@ -290,7 +300,44 @@ REQUIRE_ERR='EVIDENCE_COPY_FAILED' run_case 52_revoke_evidence_copy_fail templat
 # #5 6258874244: 하영 clusterversion/version get 최소 권한. 키트 ClusterRole 규칙이 넓어지면 회수 전 STOP, 바인딩이 빠지면 H-1 에서 STOP
 run_case 53_cv_reader_rules_widened_stops template 1 MOCK_TOKEN=1 MOCK_CV_RULES_WIDE=1
 FORBID='create token' run_case 54_cv_reader_binding_missing_stops template 1 MOCK_TOKEN=1 MOCK_CV_NOBIND=1
-unset FORBID
+# #5 2회차 6262238397: grant 가 세션에 반영되지 않으면 래퍼 안 대기 후 첫 단계 전에 STOP(→ 회수 1회)
+FORBID='^oc apply|create token' REQUIRE_ERR='grant 반영 대기 시간 초과' run_case 55_grant_not_effective_stops template 1 MOCK_GRANT_NOPROP=1 GRANT_WAIT_TRIES=2
+# PR#44 리뷰 5568617943 R1: revoke 기록 파일을 열 수 없어도(같은 경로가 디렉터리) revoke 는 호출되고 grant 가 남지 않는다. 완료로 보지 않음(rc1)
+mkdir -p "$T/home-57_revoke_log_open_fail/rosa-idp/revoke.out"
+REQUIRE_ERR='REVOKE_LOG_FAILED' run_case 57_revoke_log_open_fail normal 1
+[[ -e "$T/57_revoke_log_open_fail.log.granted" ]] && { echo "FAIL: 57 grant 가 남아 있음"; failures=1; }
+# R2: grant 대기 중 조회 오류(stdout yes + rc42 + stderr)를 정상 권한으로 보지 않는다 → 첫 쓰기 전 STOP·회수
+FORBID='^oc apply|create token' REQUIRE_ERR='grant 반영 조회 오류 rc=42' run_case 58_grant_wait_yes_rc42_stops template 1 MOCK_GW_YES_RC42=1
+# R2: 정상 no 두 번 뒤 yes 로 수렴하면 세 번째 시도에서 진행하고 끝까지 간다
+REQUIRE_ERR='GRANT_EFFECTIVE try=3' run_case 59_grant_wait_no_then_yes template 0 MOCK_TOKEN=1 MOCK_GRANT_DELAY=2
+# C1: 기록 파일(session-events.log)을 쓸 수 없으면 grant 전에 STOP — grant·revoke 0회
+mkdir -p "$T/home-60_event_log_fail_before_grant/rosa-idp/session-events.log"
+EXP_GRANT=0 EXP_REVOKE=0 REQUIRE_ERR='grant 전에 중단' run_case 60_event_log_fail_before_grant normal 1
+unset FORBID REQUIRE_ERR
+
+# 56: #5 2회차 재현 — 화면 파이프(tee)가 먼저 끊긴 뒤에도 회수(revoke)·회수 확인을 끝까지 한다.
+#     2회차 순서 그대로: 읽는 쪽(tee 대신 sed)이 GRANT_OK 줄에서 끝나 파이프가 닫힌 뒤, 단계 중 Ctrl+C(INT)가 온다.
+#     → cleanup 의 첫 로그 쓰기가 SIGPIPE 를 받는다(단계 파일은 그 사이 화면에 아무것도 쓰지 않음).
+#     대조(56b): PIPE 처리를 뺀 사본은 같은 상황에서 revoke 없이 죽어야 한다 — 56 이 의미 있는 시험인지 확인.
+mk_steps slow 'echo STEP1 >>"$MOCK_LOG"; sleep 1; kill -INT $$; sleep 1; echo STEP2_AFTER_INT >>"$MOCK_LOG"'
+sed -e "/^trap 'exit 141' PIPE\$/d" -e "s/^  trap '' INT TERM PIPE\$/  trap '' INT TERM/" "$HERE/bootstrap-session.sh" >"$T/wrapper-nopipe.sh"
+cmp -s "$HERE/bootstrap-session.sh" "$T/wrapper-nopipe.sh" && { echo "FAIL: 56b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+pipe_case() { # name wrapper expect(revoked|died)
+  local name=$1 w=$2 want=$3 log="$T/$1.log"; : >"$log"
+  env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" CLUSTER_ID=mock-id API_URL=https://api.mock:443 \
+      DEADLINE_EPOCH=$(( $(date +%s) + 600 )) VERIFY_TRIES=2 VERIFY_INTERVAL=0 \
+      bash "$w" "$T/slow.sh" 2>&1 | sed -n '/GRANT_OK/q'
+  local rc=${PIPESTATUS[0]}
+  local rv; rv=$(grep -c '^rosa revoke' "$log" || true)
+  local vf; vf=$(grep -c 'REVOKE_VERIFIED' "$T/home-$name/rosa-idp/session-events.log" 2>/dev/null || true)
+  local ok=FAIL
+  if [[ $want == revoked ]]; then [[ $rv == 1 && $vf -ge 1 ]] && ok=PASS
+  else [[ $rv == 0 && $rc == 141 ]] && ok=PASS; fi
+  [[ "$ok" == PASS ]] || failures=1
+  printf '%-26s rc=%-3s revoke=%s events_REVOKE_VERIFIED=%s expect=%s => %s\n' "$name" "$rc" "$rv" "$vf" "$want" "$ok"
+}
+pipe_case 56_pipe_closed_still_revokes "$HERE/bootstrap-session.sh" revoked
+pipe_case 56b_without_fix_dies        "$T/wrapper-nopipe.sh"        died
 
 # 증적 확인(보완 3·4, 리뷰 R3): 25 정상 회차 / 34 정책 대기 회차의 target·read-rc·분류·receipt
 ev_of() { ls -d "$T"/home-"$1"/rosa-idp/evidence-* 2>/dev/null | head -1; }

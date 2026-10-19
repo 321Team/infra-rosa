@@ -46,8 +46,16 @@ export KUBECONFIG="$WORKDIR/kubeconfig"
 
 grant_attempted=0
 watchdog_pid=""
+log_failed=0   # 기록(화면·session-events.log) 쓰기 실패 표시 — 회수는 계속하되 완료로 판정하지 않는다(PR#44 C1)
 
-log() { printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*" >&2; }
+# 화면(stderr)과 별도로 $WORKDIR/session-events.log 에도 남긴다. 화면 쪽 파이프(| tee)가 끊겨도
+# 기록이 남고, 쓰기 실패가 래퍼를 멈추지 않는다(#5 2회차 6262238397: tee 종료 뒤 SIGPIPE 로 회수 전에 죽음).
+log() {
+  local line
+  line=$(printf '[%s] %s' "$(date '+%F %T %Z')" "$*")
+  printf '%s\n' "$line" >>"$WORKDIR/session-events.log" 2>/dev/null || log_failed=1
+  printf '%s\n' "$line" >&2 2>/dev/null || log_failed=1
+}
 
 # 관리면 grant 확인 → 표준출력: ABSENT | PRESENT | UNKNOWN
 #   ABSENT 는 rc0 + (실측 빈 목록 1줄 | 머리글 형식 일치 + 대상 사용자 행에 cluster-admin 없음)일 때만.
@@ -105,17 +113,39 @@ verify_revoked() {
   return 1
 }
 
+# 기록 파일 open 실패가 revoke 호출을 막지 않게 한다(PR#44 리뷰 5568617943 R1, 이권욱 제시안).
+# `cmd >file` 은 셸이 file 을 열지 못하면 cmd 를 실행하지 않는다. open 은 한 번만 하고, 실패하면 출력을 버리고 revoke 는 그대로 호출한다.
+revoke_log_failed=0
+revoke_safely() {
+  local outfd errfd rr=0
+  if { exec {outfd}>"$WORKDIR/revoke.out"; } 2>/dev/null &&
+     { exec {errfd}>"$WORKDIR/revoke.err"; } 2>/dev/null; then
+    rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >&"$outfd" 2>&"$errfd" || rr=$?
+  else
+    revoke_log_failed=1; log_failed=1
+    log "REVOKE_LOG_FAILED: 기록 파일 open 실패 — revoke 는 계속"
+    rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >/dev/null 2>&1 || rr=$?
+  fi
+  [[ -n "${outfd:-}" ]] && exec {outfd}>&-
+  [[ -n "${errfd:-}" ]] && exec {errfd}>&-
+  return "$rr"
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT ERR
+  # 회수 경로에서는 errexit 를 끈다 — 로그 쓰기 같은 부수 실패로 revoke 전에 빠져나가지 않게(각 단계는 아래에서 rc 를 직접 검사).
+  set +eE
   # 회수 중 Ctrl+C·TERM 은 무시한다(PR#37 이재환 리뷰 #1). 무시 상태는 자식(rosa/oc)에게도 상속되어
   # revoke·회수 확인이 끝까지 간다. 강제 종료(kill -9)·세션 유실은 막을 수 없으므로 두 번째 관리 세션에서 수동 revoke.
-  trap '' INT TERM
+  # PIPE: 화면 파이프(tee)가 끊겨도 SIGPIPE 로 죽지 않고 쓰기 실패로만 처리한다(#5 2회차 원인).
+  trap '' INT TERM PIPE
   [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null || true
   log "CLEANUP_START rc=$rc grant_attempted=$grant_attempted (회수 중 Ctrl+C 무시 — 멈춰야 하면 두 번째 관리 세션에서 수동 revoke)"
   local verified=0
   if [[ "$grant_attempted" == 1 ]]; then
-    if rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y; then
+    # 출력은 파일로 받는다 — 화면 파이프 상태와 무관하게 revoke 가 끝까지 실행되도록.
+    if revoke_safely; then
       log "REVOKE_CMD_OK"
       if verify_revoked; then
         log "REVOKE_VERIFIED"; verified=1
@@ -127,6 +157,8 @@ cleanup() {
       log "CLEANUP_REQUIRED: revoke 명령 실패"
       rc=1
     fi
+    # 회수는 했어도 revoke 원문이 없으면 증적이 불완전하다 → 완료로 판정하지 않는다(rc1, receipt 미발행)
+    if [[ $revoke_log_failed == 1 ]]; then log "REVOKE_LOG_FAILED — 회수 원문 없음, 완료로 보지 않음"; rc=1; fi
   fi
   # SA token 원문(t)과 SA 전용 kubeconfig 는 성공·실패와 관계없이 항상 지운다(PR#40 보완 1).
   # 하영 세션 kubeconfig 는 남긴다 — post-revoke-check.sh 의 D-11b(회수 전 세션) 판정 뒤 그 스크립트가 지운다.
@@ -146,6 +178,8 @@ cleanup() {
   if [[ -n "${EV:-}" && -d "${EV:-/nonexistent}" ]]; then
     if ! copy_revoke_evidence; then log "EVIDENCE_COPY_FAILED — 회수 판정 원본 복사 실패"; rc=1; fi
   fi
+  # 기록 실패 회차는 완료 receipt 를 내지 않는다(PR#44 C1). 하위 셸($(...)) 안의 log 실패는 여기서 보이지 않는다.
+  [[ $log_failed == 0 ]] || rc=1
   # 완료 receipt(PR#40 리뷰 R3): 회수 확인 + 단계 정상(rc0) 또는 정책 승인 대기(rc3)일 때만 발행.
   # post-revoke-check.sh 는 이 receipt 가 없거나 값·해시가 다르면 판정 전에 STOP 한다. token 원문은 넣지 않는다.
   if [[ $verified == 1 && ( $rc == 0 || $rc == 3 ) && -n "${EV:-}" && -d "${EV:-/nonexistent}" ]]; then
@@ -153,6 +187,11 @@ cleanup() {
   fi
   # 회수 성공이어도 원래 실패/취소 rc 는 보존한다(0 으로 덮지 않음).
   log "CLEANUP_END final_rc=$rc"
+  # 마지막 로그 쓰기 실패도 완료로 남기지 않는다(PR#44 C1)
+  if [[ $log_failed != 0 ]]; then
+    rc=1
+    [[ -z "${EV:-}" ]] || rm -f -- "$EV/99-receipt.env" "$EV/99-receipt.env.tmp"
+  fi
   exit "$rc"
 }
 
@@ -171,7 +210,7 @@ copy_revoke_evidence() {
   mkdir -p "$d" || return 1
   [[ -s "$WORKDIR/preflight-cluster.json" ]] || { log "EVIDENCE: preflight-cluster.json 없음"; return 1; }
   cp -p -- "$WORKDIR/preflight-cluster.json" "$d/" || return 1
-  for f in "$WORKDIR"/verify-users.*.out "$WORKDIR"/verify-users.*.err "$WORKDIR"/verify-cani.*.out "$WORKDIR"/verify-cani.*.err; do
+  for f in "$WORKDIR"/verify-users.*.out "$WORKDIR"/verify-users.*.err "$WORKDIR"/verify-cani.*.out "$WORKDIR"/verify-cani.*.err "$WORKDIR"/revoke.out "$WORKDIR"/revoke.err; do
     [[ -e "$f" ]] || continue
     cp -p -- "$f" "$d/" || return 1
     n=$((n + 1))
@@ -213,6 +252,8 @@ issue_receipt() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# 화면 파이프가 끊긴 뒤의 쓰기(SIGPIPE)도 cleanup(회수)으로 보낸다. 기본 동작이면 trap 없이 즉시 죽는다.
+trap 'exit 141' PIPE
 
 # 대상 결속: 현재 oc 세션 server 가 승인 API URL 과 같아야 한다(로그인은 grant 뒤 단계 파일에서).
 now=$(date +%s)
@@ -247,8 +288,9 @@ if ! actual_api=$(jq -er '.api.url | select(type == "string" and length > 0)' "$
 fi
 [[ "$actual_api" == "$API_URL" ]] || { log "STOP: CLUSTER_ID 의 API URL 불일치"; exit 1; }
 
-grant_attempted=1   # 응답 유실·부분 성공도 회수 대상으로 보기 위해 grant 호출 '전에' 표시
 log "GRANT_START user=$U cluster=$CLUSTER_ID"
+[[ $log_failed == 0 ]] || { echo "STOP: 기록 쓰기 실패 — grant 전에 중단" >&2; exit 1; }   # PR#44 C1
+grant_attempted=1   # 응답 유실·부분 성공도 회수 대상으로 보기 위해 grant 호출 '전에' 표시
 rosa grant user cluster-admin --user "$U" -c "$CLUSTER_ID"
 log "GRANT_OK"
 
