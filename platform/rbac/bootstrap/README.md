@@ -22,10 +22,18 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 
 ## 생성 당일 순서 (요약)
 
-1. **① IdP**: htpasswd IdP `fds-htpasswd`에 `hayeoung`·`gwonuk`·`jaehwan` 3명을 등록합니다(해시는 개인 전달, 파일은 생성 직후 삭제). 이 단계는 래퍼 밖에서 합니다.
+1. **① IdP**: htpasswd IdP `fds-htpasswd`에 `hayeoung`·`gwonuk`·`jaehwan` 3명을 등록합니다. 이 단계는 래퍼 밖에서 하는 **유일한 쓰기**라 래퍼의 결속 검사를 거치지 않습니다. 그래서 클러스터 이름이 아니라 **Cluster ID**로 지정합니다(PR#43 리뷰 S2).
+   - **비밀번호 방식(#5 GO [6251906186](https://github.com/321Team/infra-rosa/issues/5#issuecomment-6251906186) §2와 같음)**
+     - IdP 관리자 하영이 3명의 비밀번호(무작위 20자 이상)를 만들고 bcrypt 해시 파일을 일괄 생성합니다.
+     - 비밀번호는 각 계정 소유자에게만 개인적으로 전달합니다. GitHub·이슈·공유폴더·증적에는 넣지 않습니다.
+     - 시작 기록에는 **전달 경로의 종류만**(대면, 개인 메신저 등) 적습니다.
+     - 파일은 `~/rosa-idp`(700)에만 두고 IdP 생성 직후 삭제합니다.
+     - 계정 소유자 동의(GO P8)가 있어야 시작합니다. 관리자가 현재 비밀번호를 안다는 위험은 각 계정 소유자가 받아들인 것으로 기록합니다.
    ```bash
-   rosa list idps -c fds-rosa-hcp
-   rosa create idp -c fds-rosa-hcp --type htpasswd --name fds-htpasswd --from-file ~/rosa-idp/htpasswd
+   CLUSTER_ID=<id>                                   # 실행 카드의 Cluster ID
+   rosa list idps -c "$CLUSTER_ID"                   # htpasswd 가 이미 있으면 STOP
+   rosa create idp -c "$CLUSTER_ID" --type htpasswd --name fds-htpasswd --from-file ~/rosa-idp/htpasswd
+   rm -f ~/rosa-idp/htpasswd                         # 생성 직후 삭제
    ```
 2. **②~⑪ 래퍼 한 번 실행** — 아래 "실행 카드"를 먼저 채우고, 두 번째 관리 세션(회수용)을 미리 열어 둡니다.
    `API_URL`은 손으로 적지 않고 **`rosa describe`가 돌려주는 표기 그대로** 씁니다. 래퍼는 이 값과 정확히 일치하는지 비교하며(포트 `:443`·끝 `/` 차이도 불일치 → STOP), 표기를 정규화하지 않습니다.
@@ -56,14 +64,51 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
    CLUSTER_ID=<id> API_URL=<api url> ./post-revoke-check.sh ~/rosa-idp/evidence-<시각>; echo "rc=$?"
    ```
 4. **D-11d** — 권욱·재환이 **각자 본인 로그인**으로 확인해 #5에 결과를 붙입니다.
+   - **전용 KUBECONFIG 파일로 실행합니다(PR#43 리뷰 S1, GO P9).** 기본 kubeconfig에 로그인하면 Phase 1 공용 OCP context가 있는 파일에 ROSA context가 추가되고 current-context가 바뀝니다. 그러면 이후 Phase 1 명령이 ROSA로 갈 수 있습니다.
+   - `fds-app`·`monitoring-api`는 Phase 1에도 있는 namespace 이름입니다. 그래서 결과에 `oc whoami`·`--show-server`를 반드시 포함합니다. server가 API_URL과 다르면 그 자리에서 중단합니다.
+   - 증적 표기: "계정 소유자가 실행, 비밀번호는 IdP 관리자도 앎"(GO §2).
+
+   bash(CloudShell·Linux·Git Bash):
    ```bash
-   oc login <api url> -u <본인 id>
-   oc auth can-i get pods -n fds-app            # yes
-   oc auth can-i create deployments -n fds-app  # no
-   oc auth can-i list nodes                     # no
-   oc auth can-i get secrets -n fds-app         # no
+   export KUBECONFIG="$HOME/.kube/rosa-d11d"          # 전용 파일. 기존 kubeconfig 는 건드리지 않음
+   API_URL=<실행 카드의 API_URL>
+   oc login "$API_URL" -u <본인 id>
+   oc whoami; oc whoami --show-server                 # 결과에 포함
+   if [ "$(oc whoami --show-server)" = "$API_URL" ]; then
+     oc auth can-i get pods -n fds-app                # yes
+     oc auth can-i create deployments -n fds-app      # no
+     oc auth can-i list nodes                         # no
+     oc auth can-i get secrets -n fds-app             # no
+   else
+     echo "STOP: server 불일치 — 확인 명령을 실행하지 않음"
+   fi
+   oc logout; rm -f "$KUBECONFIG"; unset KUBECONFIG   # 전용 파일 정리(결과와 관계없이)
+   ```
+   PowerShell(Windows):
+   ```powershell
+   $env:KUBECONFIG = "$HOME\.kube\rosa-d11d"
+   $API_URL = "<실행 카드의 API_URL>"
+   oc login $API_URL -u <본인 id>
+   oc whoami; oc whoami --show-server
+   if ((oc whoami --show-server) -eq $API_URL) {
+     oc auth can-i get pods -n fds-app
+     oc auth can-i create deployments -n fds-app
+     oc auth can-i list nodes
+     oc auth can-i get secrets -n fds-app
+   } else { "STOP: server 불일치 — 확인 명령을 실행하지 않음" }
+   oc logout; Remove-Item $env:KUBECONFIG; Remove-Item Env:KUBECONFIG
    ```
 5. 증적을 `fds-project-evidence` `evidence/P2-ROSA-01/`로 PR 편입(독립 리뷰)하고, #4 Handoff 4·5에 제공합니다.
+   - **반출 대상(PR#43 리뷰 S3)**: 아래 전부를 묶고, 묶음 안에 `SHA256SUMS`를 넣은 뒤 공유 사본을 재해시합니다.
+     - `~/rosa-idp/bootstrap.log` — 래퍼 로그
+     - `~/rosa-idp/evidence-<시각>/` 전체 — 특히 `11-revoke-verify/`가 들어 있어야 합니다. 래퍼가 cleanup에서 복사합니다:
+       - `verify-users.N.{out,err}`: 관리면 회수 판정 원문. `REVOKE_VERIFIED`의 직접 근거
+       - `verify-cani.N.{out,err}`: 회수 전 세션 SSAR 원문
+       - `preflight-cluster.json`: grant 전 Cluster ID↔API 결속, `external_id` 근거
+       - `SHA256SUMS`
+     - `~/rosa-idp/d11-<시각>/` — ⑫ 결과
+   - `11-revoke-verify/`가 없거나 `sha256sum -c`가 실패하면 증적이 불완전한 것입니다. 래퍼도 복사에 실패하면 `EVIDENCE_COPY_FAILED`로 rc=1이 되고 receipt를 발행하지 않습니다.
+   - `rosa whoami` 출력에 들어 있는 계정 이메일·이름 줄은 evidence 저장소로 옮기기 전에 가립니다.
 
 ## 실행 카드 — 작업창 확정 때 채워서 #5에 먼저 올림 (PR#37 이권욱 리뷰)
 
