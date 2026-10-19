@@ -1,8 +1,10 @@
 # 플랫폼 기본 binding 승인 목록 (infra-rosa#5, AFTER-CREATE)
 
-`platform-defaults.approved.tsv`는 **아직 없습니다.** 실제 ROSA 클러스터의 첫 bootstrap 증적을 보고 PR 리뷰로 만듭니다.
+`platform-defaults.approved.tsv`는 **2026-10-19 run7(fds-rosa-hcp)의 실제 기본 binding 20행을 고정한 목록**입니다(PR#47).
 
-- **용도**: `bootstrap/classify-access-paths.sh`가 `system:authenticated(:oauth)` 그룹에만 붙은 binding을 "플랫폼 기본"으로 인정하는 유일한 근거입니다.
+- **용도**: `bootstrap/classify-access-paths.sh`가 `system:authenticated(:oauth)` 그룹, 그리고 명시된 `system:unauthenticated` 조합에만 붙은 binding을 "플랫폼 기본"으로 인정하는 유일한 근거입니다. scope·binding·roleRef·주체·규칙 해시를 정확히 대조합니다.
+- **해석 주의**: 이 목록에는 self-provisioning(로그인 사용자의 새 project 생성, 생성한 project의 admin), 빌드 전략 사용, restricted SCC 사용, 본인 OAuth token 관리 같은 기본 기능이 들어 있습니다. **전부 조회 전용 권한으로 해석하지 않습니다.** 새 project 생성·사용을 업무 실행 승인으로 넓히지도 않습니다. self-provisioning을 끄는 하드닝은 별도 변경으로 다룹니다.
+- **이식 금지**: 이 클러스터 전용입니다. 다른 클러스터나 재생성한 클러스터에서는 기존 값을 자동 승인하지 않고, 새 inventory와 대조해 다시 리뷰합니다.
 - **없으면**: 그런 binding은 `PENDING_POLICY`로 분류됩니다. bootstrap 래퍼는 회수까지 정상으로 마친 뒤 **rc=3**으로 끝나고, `post-revoke-check.sh`는 이 파일이 생길 때까지 STOP합니다.
 
 ## 형식 (TSV, `#`로 시작하는 줄은 주석)
