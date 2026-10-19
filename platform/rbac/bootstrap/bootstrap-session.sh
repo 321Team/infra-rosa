@@ -112,6 +112,24 @@ verify_revoked() {
   return 1
 }
 
+# 기록 파일 open 실패가 revoke 호출을 막지 않게 한다(PR#44 리뷰 5568617943 R1, 이권욱 제시안).
+# `cmd >file` 은 셸이 file 을 열지 못하면 cmd 를 실행하지 않는다. open 은 한 번만 하고, 실패하면 출력을 버리고 revoke 는 그대로 호출한다.
+revoke_log_failed=0
+revoke_safely() {
+  local outfd errfd rr=0
+  if { exec {outfd}>"$WORKDIR/revoke.out"; } 2>/dev/null &&
+     { exec {errfd}>"$WORKDIR/revoke.err"; } 2>/dev/null; then
+    rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >&"$outfd" 2>&"$errfd" || rr=$?
+  else
+    revoke_log_failed=1
+    log "REVOKE_LOG_FAILED: 기록 파일 open 실패 — revoke 는 계속"
+    rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >/dev/null 2>&1 || rr=$?
+  fi
+  [[ -n "${outfd:-}" ]] && exec {outfd}>&-
+  [[ -n "${errfd:-}" ]] && exec {errfd}>&-
+  return "$rr"
+}
+
 cleanup() {
   local rc=$?
   trap - EXIT ERR
@@ -126,7 +144,7 @@ cleanup() {
   local verified=0
   if [[ "$grant_attempted" == 1 ]]; then
     # 출력은 파일로 받는다 — 화면 파이프 상태와 무관하게 revoke 가 끝까지 실행되도록.
-    if rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >"$WORKDIR/revoke.out" 2>"$WORKDIR/revoke.err"; then
+    if revoke_safely; then
       log "REVOKE_CMD_OK"
       if verify_revoked; then
         log "REVOKE_VERIFIED"; verified=1
@@ -138,6 +156,8 @@ cleanup() {
       log "CLEANUP_REQUIRED: revoke 명령 실패"
       rc=1
     fi
+    # 회수는 했어도 revoke 원문이 없으면 증적이 불완전하다 → 완료로 판정하지 않는다(rc1, receipt 미발행)
+    if [[ $revoke_log_failed == 1 ]]; then log "REVOKE_LOG_FAILED — 회수 원문 없음, 완료로 보지 않음"; rc=1; fi
   fi
   # SA token 원문(t)과 SA 전용 kubeconfig 는 성공·실패와 관계없이 항상 지운다(PR#40 보완 1).
   # 하영 세션 kubeconfig 는 남긴다 — post-revoke-check.sh 의 D-11b(회수 전 세션) 판정 뒤 그 스크립트가 지운다.

@@ -91,7 +91,14 @@ if [[ "$1 $2" == "auth can-i" && "$*" == *"--as=hayeoung"* ]]; then
 fi
 if [[ "$1 $2" == "auth can-i" ]]; then
   # 기본: grant 상태 파일이 있으면 yes(반영됨), 없으면 no. MOCK_CANI_RC 를 주면 그 값으로 고정(회수 확인 실패 주입용)
-  if [[ -n "${MOCK_CANI_RC:-}" ]]; then rc=$MOCK_CANI_RC; elif [[ -e "$MOCK_LOG.granted" ]]; then rc=0; else rc=1; fi
+  # 58: MOCK_GW_YES_RC42 = grant 상태에서 stdout yes 인데 rc42·stderr 오류(R2 반례)
+  # 59: MOCK_GRANT_DELAY=n = grant 뒤 처음 n번은 no(반영 지연) → 그다음 yes
+  if [[ -n "${MOCK_CANI_RC:-}" ]]; then rc=$MOCK_CANI_RC
+  elif [[ -e "$MOCK_LOG.granted" ]]; then
+    [[ "${MOCK_GW_YES_RC42:-0}" == 1 ]] && { echo yes; echo "mock: server error" >&2; exit 42; }
+    n=$(( $(cat "$MOCK_LOG.cani" 2>/dev/null || echo 0) + 1 )); echo "$n" >"$MOCK_LOG.cani"
+    rc=0; (( n <= ${MOCK_GRANT_DELAY:-0} )) && rc=1
+  else rc=1; fi
   case "$rc" in 0) echo yes ;; 1) echo no ;; esac
   [[ -n "${MOCK_CANI_ERR:-}" ]] && echo "$MOCK_CANI_ERR" >&2
   exit "$rc"
@@ -295,6 +302,14 @@ run_case 53_cv_reader_rules_widened_stops template 1 MOCK_TOKEN=1 MOCK_CV_RULES_
 FORBID='create token' run_case 54_cv_reader_binding_missing_stops template 1 MOCK_TOKEN=1 MOCK_CV_NOBIND=1
 # #5 2회차 6262238397: grant 가 세션에 반영되지 않으면 래퍼 안 대기 후 첫 단계 전에 STOP(→ 회수 1회)
 FORBID='^oc apply|create token' REQUIRE_ERR='grant 반영 대기 시간 초과' run_case 55_grant_not_effective_stops template 1 MOCK_GRANT_NOPROP=1 GRANT_WAIT_TRIES=2
+# PR#44 리뷰 5568617943 R1: revoke 기록 파일을 열 수 없어도(같은 경로가 디렉터리) revoke 는 호출되고 grant 가 남지 않는다. 완료로 보지 않음(rc1)
+mkdir -p "$T/home-57_revoke_log_open_fail/rosa-idp/revoke.out"
+REQUIRE_ERR='REVOKE_LOG_FAILED' run_case 57_revoke_log_open_fail normal 1
+[[ -e "$T/57_revoke_log_open_fail.log.granted" ]] && { echo "FAIL: 57 grant 가 남아 있음"; failures=1; }
+# R2: grant 대기 중 조회 오류(stdout yes + rc42 + stderr)를 정상 권한으로 보지 않는다 → 첫 쓰기 전 STOP·회수
+FORBID='^oc apply|create token' REQUIRE_ERR='grant 반영 조회 오류 rc=42' run_case 58_grant_wait_yes_rc42_stops template 1 MOCK_GW_YES_RC42=1
+# R2: 정상 no 두 번 뒤 yes 로 수렴하면 세 번째 시도에서 진행하고 끝까지 간다
+REQUIRE_ERR='GRANT_EFFECTIVE try=3' run_case 59_grant_wait_no_then_yes template 0 MOCK_TOKEN=1 MOCK_GRANT_DELAY=2
 unset FORBID REQUIRE_ERR
 
 # 56: #5 2회차 재현 — 화면 파이프(tee)가 먼저 끊긴 뒤에도 회수(revoke)·회수 확인을 끝까지 한다.

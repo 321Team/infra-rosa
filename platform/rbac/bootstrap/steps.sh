@@ -72,14 +72,20 @@ run_steps() {
   [[ "$(oc whoami --show-server)" == "$API_URL" ]] || { log "STOP: server 불일치"; return 1; }
   # grant 반영 대기(#5 2회차 6262238397): 로그인 자체는 권한 없이도 되므로, 첫 단계 전에 이 세션의 SSAR 이
   # 정확히 yes 가 될 때까지 래퍼 안에서 기다린다. 다른 탭·Ctrl+C 가 필요 없게 한다. 시간 초과면 STOP(→ 회수).
-  local w gw_out
-  for ((w = 1; w <= ${GRANT_WAIT_TRIES:-30}; w++)); do
-    gw_out=$(oc auth can-i '*' '*' --all-namespaces 2>/dev/null) || true
-    printf '%s try=%s %s\n' "$(date '+%FT%T%z')" "$w" "${gw_out:-ERR}" >>"$EV/03-grant-wait.txt"
-    [[ "$gw_out" == yes ]] && break
-    ((w < ${GRANT_WAIT_TRIES:-30})) && sleep "${GRANT_WAIT_INTERVAL:-10}"
+  # 판정(PR#44 리뷰 5568617943 R2, 이권욱 제시안): yes+rc0 만 통과, 정상 no(rc1·stderr 없음)만 제한 대기, 그 밖은 즉시 STOP.
+  local w gw_out gw_rc=1
+  local gw_tries="${GRANT_WAIT_TRIES:-30}" gw_interval="${GRANT_WAIT_INTERVAL:-10}"
+  [[ "$gw_tries" =~ ^[1-9][0-9]*$ && "$gw_interval" =~ ^[0-9]+$ ]] || { log "STOP: grant 대기 입력 오류"; return 1; }
+  for ((w = 1; w <= gw_tries; w++)); do
+    gw_rc=0
+    oc auth can-i '*' '*' --all-namespaces >"$EV/03-grant-wait.$w.out" 2>"$EV/03-grant-wait.$w.err" || gw_rc=$?
+    gw_out=$(<"$EV/03-grant-wait.$w.out")
+    printf '%s try=%s rc=%s %s\n' "$(date '+%FT%T%z')" "$w" "$gw_rc" "${gw_out:-EMPTY}" >>"$EV/03-grant-wait.txt"
+    [[ $gw_rc == 0 && "$gw_out" == yes ]] && break
+    [[ $gw_rc == 1 && "$gw_out" == no && ! -s "$EV/03-grant-wait.$w.err" ]] || { log "STOP: grant 반영 조회 오류 rc=$gw_rc"; return 1; }
+    if ((w < gw_tries)); then sleep "$gw_interval"; fi
   done
-  [[ "$gw_out" == yes ]] || { log "STOP: grant 반영 대기 시간 초과"; return 1; }
+  [[ $gw_rc == 0 && "$gw_out" == yes ]] || { log "STOP: grant 반영 대기 시간 초과"; return 1; }
   log "GRANT_EFFECTIVE try=$w"
   ( cd "$MANIFEST_DIR" && sha256sum namespaces.yaml rbac.yaml human-bindings.yaml ) >"$EV/00-manifest-sha256.txt"
   # 대상 기록(PR#40 보완 3): post-revoke-check.sh 가 이 회차의 클러스터·API·사용자와 같은지 대조한다.
