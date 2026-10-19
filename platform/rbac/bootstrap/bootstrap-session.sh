@@ -47,7 +47,14 @@ export KUBECONFIG="$WORKDIR/kubeconfig"
 grant_attempted=0
 watchdog_pid=""
 
-log() { printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*" >&2; }
+# 화면(stderr)과 별도로 $WORKDIR/session-events.log 에도 남긴다. 화면 쪽 파이프(| tee)가 끊겨도
+# 기록이 남고, 쓰기 실패가 래퍼를 멈추지 않는다(#5 2회차 6262238397: tee 종료 뒤 SIGPIPE 로 회수 전에 죽음).
+log() {
+  local line
+  line=$(printf '[%s] %s' "$(date '+%F %T %Z')" "$*")
+  printf '%s\n' "$line" >>"$WORKDIR/session-events.log" 2>/dev/null || true
+  printf '%s\n' "$line" >&2 2>/dev/null || true
+}
 
 # 관리면 grant 확인 → 표준출력: ABSENT | PRESENT | UNKNOWN
 #   ABSENT 는 rc0 + (실측 빈 목록 1줄 | 머리글 형식 일치 + 대상 사용자 행에 cluster-admin 없음)일 때만.
@@ -108,14 +115,18 @@ verify_revoked() {
 cleanup() {
   local rc=$?
   trap - EXIT ERR
+  # 회수 경로에서는 errexit 를 끈다 — 로그 쓰기 같은 부수 실패로 revoke 전에 빠져나가지 않게(각 단계는 아래에서 rc 를 직접 검사).
+  set +eE
   # 회수 중 Ctrl+C·TERM 은 무시한다(PR#37 이재환 리뷰 #1). 무시 상태는 자식(rosa/oc)에게도 상속되어
   # revoke·회수 확인이 끝까지 간다. 강제 종료(kill -9)·세션 유실은 막을 수 없으므로 두 번째 관리 세션에서 수동 revoke.
-  trap '' INT TERM
+  # PIPE: 화면 파이프(tee)가 끊겨도 SIGPIPE 로 죽지 않고 쓰기 실패로만 처리한다(#5 2회차 원인).
+  trap '' INT TERM PIPE
   [[ -n "$watchdog_pid" ]] && kill "$watchdog_pid" 2>/dev/null || true
   log "CLEANUP_START rc=$rc grant_attempted=$grant_attempted (회수 중 Ctrl+C 무시 — 멈춰야 하면 두 번째 관리 세션에서 수동 revoke)"
   local verified=0
   if [[ "$grant_attempted" == 1 ]]; then
-    if rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y; then
+    # 출력은 파일로 받는다 — 화면 파이프 상태와 무관하게 revoke 가 끝까지 실행되도록.
+    if rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >"$WORKDIR/revoke.out" 2>"$WORKDIR/revoke.err"; then
       log "REVOKE_CMD_OK"
       if verify_revoked; then
         log "REVOKE_VERIFIED"; verified=1
@@ -171,7 +182,7 @@ copy_revoke_evidence() {
   mkdir -p "$d" || return 1
   [[ -s "$WORKDIR/preflight-cluster.json" ]] || { log "EVIDENCE: preflight-cluster.json 없음"; return 1; }
   cp -p -- "$WORKDIR/preflight-cluster.json" "$d/" || return 1
-  for f in "$WORKDIR"/verify-users.*.out "$WORKDIR"/verify-users.*.err "$WORKDIR"/verify-cani.*.out "$WORKDIR"/verify-cani.*.err; do
+  for f in "$WORKDIR"/verify-users.*.out "$WORKDIR"/verify-users.*.err "$WORKDIR"/verify-cani.*.out "$WORKDIR"/verify-cani.*.err "$WORKDIR"/revoke.out "$WORKDIR"/revoke.err; do
     [[ -e "$f" ]] || continue
     cp -p -- "$f" "$d/" || return 1
     n=$((n + 1))
@@ -213,6 +224,8 @@ issue_receipt() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# 화면 파이프가 끊긴 뒤의 쓰기(SIGPIPE)도 cleanup(회수)으로 보낸다. 기본 동작이면 trap 없이 즉시 죽는다.
+trap 'exit 141' PIPE
 
 # 대상 결속: 현재 oc 세션 server 가 승인 API URL 과 같아야 한다(로그인은 grant 뒤 단계 파일에서).
 now=$(date +%s)

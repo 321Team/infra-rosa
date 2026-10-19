@@ -17,10 +17,11 @@ case "$1 $2" in
       broken) echo '<html>bad gateway</html>' ;;
     esac
     exit "${MOCK_DESCRIBE_RC:-0}" ;;
-  "grant user")  exit 0 ;;
+  "grant user")  [[ "${MOCK_GRANT_NOPROP:-0}" == 1 ]] || : >"$MOCK_LOG.granted"; exit 0 ;;   # 55: 반영 안 됨 주입
   "revoke user")
     # 29: 실제 Ctrl+C 처럼 자기 프로세스 그룹 전체(래퍼+rosa)에 INT. 회수 중 무시가 상속되면 rosa 도 끝까지 간다.
     if [[ "${MOCK_INT_DURING_REVOKE:-0}" == 1 ]]; then kill -INT 0; sleep 0.3; echo "MOCK: revoke survived INT" >>"$MOCK_LOG"; fi
+    [[ "${MOCK_REVOKE_RC:-0}" == 0 ]] && rm -f "$MOCK_LOG.granted"
     exit "${MOCK_REVOKE_RC:-0}" ;;
   "list users")
     case "${MOCK_USERS_MODE:-std}" in
@@ -89,7 +90,8 @@ if [[ "$1 $2" == "auth can-i" && "$*" == *"--as=hayeoung"* ]]; then
   esac
 fi
 if [[ "$1 $2" == "auth can-i" ]]; then
-  rc="${MOCK_CANI_RC:-1}"
+  # 기본: grant 상태 파일이 있으면 yes(반영됨), 없으면 no. MOCK_CANI_RC 를 주면 그 값으로 고정(회수 확인 실패 주입용)
+  if [[ -n "${MOCK_CANI_RC:-}" ]]; then rc=$MOCK_CANI_RC; elif [[ -e "$MOCK_LOG.granted" ]]; then rc=0; else rc=1; fi
   case "$rc" in 0) echo yes ;; 1) echo no ;; esac
   [[ -n "${MOCK_CANI_ERR:-}" ]] && echo "$MOCK_CANI_ERR" >&2
   exit "$rc"
@@ -190,7 +192,7 @@ run_case() { # name steps expect_rc [env...]
   fi
   "${pre[@]}" env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" \
       CLUSTER_ID=mock-id API_URL=https://api.mock:443 DEADLINE_EPOCH="$dl" \
-      VERIFY_TRIES=2 VERIFY_INTERVAL=0 MANIFEST_DIR="$HERE/../manifests" KIT_DIR="$HERE" POLICY_FILE="$T/policy.tsv" "$@" \
+      VERIFY_TRIES=2 VERIFY_INTERVAL=0 GRANT_WAIT_INTERVAL=0 MANIFEST_DIR="$HERE/../manifests" KIT_DIR="$HERE" POLICY_FILE="$T/policy.tsv" "$@" \
       bash "${WRAPPER:-$HERE/bootstrap-session.sh}" "$T/$steps.sh" 2>"$T/$name.err"
   local rc=$?
   local after; after=$(grep -c '_AFTER_' "$log" || true)
@@ -290,7 +292,32 @@ REQUIRE_ERR='EVIDENCE_COPY_FAILED' run_case 52_revoke_evidence_copy_fail templat
 # #5 6258874244: 하영 clusterversion/version get 최소 권한. 키트 ClusterRole 규칙이 넓어지면 회수 전 STOP, 바인딩이 빠지면 H-1 에서 STOP
 run_case 53_cv_reader_rules_widened_stops template 1 MOCK_TOKEN=1 MOCK_CV_RULES_WIDE=1
 FORBID='create token' run_case 54_cv_reader_binding_missing_stops template 1 MOCK_TOKEN=1 MOCK_CV_NOBIND=1
-unset FORBID
+# #5 2회차 6262238397: grant 가 세션에 반영되지 않으면 래퍼 안 대기 후 첫 단계 전에 STOP(→ 회수 1회)
+FORBID='^oc apply|create token' REQUIRE_ERR='grant 반영 대기 시간 초과' run_case 55_grant_not_effective_stops template 1 MOCK_GRANT_NOPROP=1 GRANT_WAIT_TRIES=2
+unset FORBID REQUIRE_ERR
+
+# 56: #5 2회차 재현 — 화면 파이프(tee)가 먼저 끊긴 뒤에도 회수(revoke)·회수 확인을 끝까지 한다.
+#     읽는 쪽이 첫 바이트만 읽고 끝나면(head -c1) 이후 래퍼의 화면 쓰기는 SIGPIPE 를 받는다.
+#     대조(56b): PIPE 처리를 뺀 사본은 같은 상황에서 revoke 없이 죽어야 한다 — 56 이 의미 있는 시험인지 확인.
+mk_steps slow 'echo STEP1 >>"$MOCK_LOG"; sleep 1; echo STEP2 >&2; sleep 1; echo STEP3 >>"$MOCK_LOG"'
+sed -e "/^trap 'exit 141' PIPE\$/d" -e "s/^  trap '' INT TERM PIPE\$/  trap '' INT TERM/" "$HERE/bootstrap-session.sh" >"$T/wrapper-nopipe.sh"
+cmp -s "$HERE/bootstrap-session.sh" "$T/wrapper-nopipe.sh" && { echo "FAIL: 56b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+pipe_case() { # name wrapper expect(revoked|died)
+  local name=$1 w=$2 want=$3 log="$T/$1.log"; : >"$log"
+  env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" CLUSTER_ID=mock-id API_URL=https://api.mock:443 \
+      DEADLINE_EPOCH=$(( $(date +%s) + 600 )) VERIFY_TRIES=2 VERIFY_INTERVAL=0 \
+      bash "$w" "$T/slow.sh" 2>&1 | head -c 1 >/dev/null
+  local rc=${PIPESTATUS[0]}
+  local rv; rv=$(grep -c '^rosa revoke' "$log" || true)
+  local vf; vf=$(grep -c 'REVOKE_VERIFIED' "$T/home-$name/rosa-idp/session-events.log" 2>/dev/null || true)
+  local ok=FAIL
+  if [[ $want == revoked ]]; then [[ $rv == 1 && $vf -ge 1 ]] && ok=PASS
+  else [[ $rv == 0 && $rc == 141 ]] && ok=PASS; fi
+  [[ "$ok" == PASS ]] || failures=1
+  printf '%-26s rc=%-3s revoke=%s events_REVOKE_VERIFIED=%s expect=%s => %s\n' "$name" "$rc" "$rv" "$vf" "$want" "$ok"
+}
+pipe_case 56_pipe_closed_still_revokes "$HERE/bootstrap-session.sh" revoked
+pipe_case 56b_without_fix_dies        "$T/wrapper-nopipe.sh"        died
 
 # 증적 확인(보완 3·4, 리뷰 R3): 25 정상 회차 / 34 정책 대기 회차의 target·read-rc·분류·receipt
 ev_of() { ls -d "$T"/home-"$1"/rosa-idp/evidence-* 2>/dev/null | head -1; }

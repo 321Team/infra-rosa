@@ -70,6 +70,17 @@ run_steps() {
   oc login "$API_URL" -u "$U"
   [[ "$(oc whoami)" == "$U" ]] || { log "STOP: whoami 불일치"; return 1; }
   [[ "$(oc whoami --show-server)" == "$API_URL" ]] || { log "STOP: server 불일치"; return 1; }
+  # grant 반영 대기(#5 2회차 6262238397): 로그인 자체는 권한 없이도 되므로, 첫 단계 전에 이 세션의 SSAR 이
+  # 정확히 yes 가 될 때까지 래퍼 안에서 기다린다. 다른 탭·Ctrl+C 가 필요 없게 한다. 시간 초과면 STOP(→ 회수).
+  local w gw_out
+  for ((w = 1; w <= ${GRANT_WAIT_TRIES:-30}; w++)); do
+    gw_out=$(oc auth can-i '*' '*' --all-namespaces 2>/dev/null) || true
+    printf '%s try=%s %s\n' "$(date '+%FT%T%z')" "$w" "${gw_out:-ERR}" >>"$EV/03-grant-wait.txt"
+    [[ "$gw_out" == yes ]] && break
+    ((w < ${GRANT_WAIT_TRIES:-30})) && sleep "${GRANT_WAIT_INTERVAL:-10}"
+  done
+  [[ "$gw_out" == yes ]] || { log "STOP: grant 반영 대기 시간 초과"; return 1; }
+  log "GRANT_EFFECTIVE try=$w"
   ( cd "$MANIFEST_DIR" && sha256sum namespaces.yaml rbac.yaml human-bindings.yaml ) >"$EV/00-manifest-sha256.txt"
   # 대상 기록(PR#40 보완 3): post-revoke-check.sh 가 이 회차의 클러스터·API·사용자와 같은지 대조한다.
   printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nSTARTED_AT=%s\n' \
