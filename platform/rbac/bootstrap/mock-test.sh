@@ -310,6 +310,9 @@ REQUIRE_ERR='REVOKE_LOG_FAILED' run_case 57_revoke_log_open_fail normal 1
 FORBID='^oc apply|create token' REQUIRE_ERR='grant 반영 조회 오류 rc=42' run_case 58_grant_wait_yes_rc42_stops template 1 MOCK_GW_YES_RC42=1
 # R2: 정상 no 두 번 뒤 yes 로 수렴하면 세 번째 시도에서 진행하고 끝까지 간다
 REQUIRE_ERR='GRANT_EFFECTIVE try=3' run_case 59_grant_wait_no_then_yes template 0 MOCK_TOKEN=1 MOCK_GRANT_DELAY=2
+# C1: 기록 파일(session-events.log)을 쓸 수 없으면 grant 전에 STOP — grant·revoke 0회
+mkdir -p "$T/home-60_event_log_fail_before_grant/rosa-idp/session-events.log"
+EXP_GRANT=0 EXP_REVOKE=0 REQUIRE_ERR='grant 전에 중단' run_case 60_event_log_fail_before_grant normal 1
 unset FORBID REQUIRE_ERR
 
 # 56: #5 2회차 재현 — 화면 파이프(tee)가 먼저 끊긴 뒤에도 회수(revoke)·회수 확인을 끝까지 한다.

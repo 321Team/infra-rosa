@@ -46,14 +46,15 @@ export KUBECONFIG="$WORKDIR/kubeconfig"
 
 grant_attempted=0
 watchdog_pid=""
+log_failed=0   # 기록(화면·session-events.log) 쓰기 실패 표시 — 회수는 계속하되 완료로 판정하지 않는다(PR#44 C1)
 
 # 화면(stderr)과 별도로 $WORKDIR/session-events.log 에도 남긴다. 화면 쪽 파이프(| tee)가 끊겨도
 # 기록이 남고, 쓰기 실패가 래퍼를 멈추지 않는다(#5 2회차 6262238397: tee 종료 뒤 SIGPIPE 로 회수 전에 죽음).
 log() {
   local line
   line=$(printf '[%s] %s' "$(date '+%F %T %Z')" "$*")
-  printf '%s\n' "$line" >>"$WORKDIR/session-events.log" 2>/dev/null || true
-  printf '%s\n' "$line" >&2 2>/dev/null || true
+  printf '%s\n' "$line" >>"$WORKDIR/session-events.log" 2>/dev/null || log_failed=1
+  printf '%s\n' "$line" >&2 2>/dev/null || log_failed=1
 }
 
 # 관리면 grant 확인 → 표준출력: ABSENT | PRESENT | UNKNOWN
@@ -121,7 +122,7 @@ revoke_safely() {
      { exec {errfd}>"$WORKDIR/revoke.err"; } 2>/dev/null; then
     rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >&"$outfd" 2>&"$errfd" || rr=$?
   else
-    revoke_log_failed=1
+    revoke_log_failed=1; log_failed=1
     log "REVOKE_LOG_FAILED: 기록 파일 open 실패 — revoke 는 계속"
     rosa revoke user cluster-admin --user "$U" -c "$CLUSTER_ID" -y </dev/null >/dev/null 2>&1 || rr=$?
   fi
@@ -177,6 +178,8 @@ cleanup() {
   if [[ -n "${EV:-}" && -d "${EV:-/nonexistent}" ]]; then
     if ! copy_revoke_evidence; then log "EVIDENCE_COPY_FAILED — 회수 판정 원본 복사 실패"; rc=1; fi
   fi
+  # 기록 실패 회차는 완료 receipt 를 내지 않는다(PR#44 C1). 하위 셸($(...)) 안의 log 실패는 여기서 보이지 않는다.
+  [[ $log_failed == 0 ]] || rc=1
   # 완료 receipt(PR#40 리뷰 R3): 회수 확인 + 단계 정상(rc0) 또는 정책 승인 대기(rc3)일 때만 발행.
   # post-revoke-check.sh 는 이 receipt 가 없거나 값·해시가 다르면 판정 전에 STOP 한다. token 원문은 넣지 않는다.
   if [[ $verified == 1 && ( $rc == 0 || $rc == 3 ) && -n "${EV:-}" && -d "${EV:-/nonexistent}" ]]; then
@@ -184,6 +187,11 @@ cleanup() {
   fi
   # 회수 성공이어도 원래 실패/취소 rc 는 보존한다(0 으로 덮지 않음).
   log "CLEANUP_END final_rc=$rc"
+  # 마지막 로그 쓰기 실패도 완료로 남기지 않는다(PR#44 C1)
+  if [[ $log_failed != 0 ]]; then
+    rc=1
+    [[ -z "${EV:-}" ]] || rm -f -- "$EV/99-receipt.env" "$EV/99-receipt.env.tmp"
+  fi
   exit "$rc"
 }
 
@@ -280,8 +288,9 @@ if ! actual_api=$(jq -er '.api.url | select(type == "string" and length > 0)' "$
 fi
 [[ "$actual_api" == "$API_URL" ]] || { log "STOP: CLUSTER_ID 의 API URL 불일치"; exit 1; }
 
-grant_attempted=1   # 응답 유실·부분 성공도 회수 대상으로 보기 위해 grant 호출 '전에' 표시
 log "GRANT_START user=$U cluster=$CLUSTER_ID"
+[[ $log_failed == 0 ]] || { echo "STOP: 기록 쓰기 실패 — grant 전에 중단" >&2; exit 1; }   # PR#44 C1
+grant_attempted=1   # 응답 유실·부분 성공도 회수 대상으로 보기 위해 grant 호출 '전에' 표시
 rosa grant user cluster-admin --user "$U" -c "$CLUSTER_ID"
 log "GRANT_OK"
 
