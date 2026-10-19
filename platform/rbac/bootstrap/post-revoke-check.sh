@@ -46,10 +46,11 @@ trap cleanup_new EXIT
 
 # 요청 분류: ALLOW / DENY(RBAC 403) / UNAUTH(401) / OTHER
 # DENY 는 "(Forbidden)" 만으로 인정하지 않고 RBAC 거부 문장(User "<U>" cannot <verb> resource "...")일 때만(PR#40 보완 5).
+# steps.sh 와 같은 기준: "(Forbidden)" 문구 유무가 아니라 "is forbidden: User \"<U>\" cannot …" 문장으로 본다(#5 6회차 D-01).
 cls() {
   local rc=$1 errf=$2
   if [[ $rc -eq 0 ]]; then echo ALLOW
-  elif grep -q '(Forbidden)' "$errf" && grep -qF "User \"$U\" cannot " "$errf" \
+  elif grep -qF "is forbidden: User \"$U\" cannot " "$errf" \
        && grep -qE 'cannot [a-z]+ resource "' "$errf"; then echo DENY
   elif grep -Eq 'Unauthorized|must be logged in' "$errf"; then echo UNAUTH
   else echo OTHER; fi

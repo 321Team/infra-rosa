@@ -45,7 +45,15 @@ cat >"$T/bin/oc" <<'EOF'
 #!/usr/bin/env bash
 echo "oc $*" >>"$MOCK_LOG"
 # 실제 RBAC 거부 형식: ... is forbidden: User "<주체>" cannot <verb> resource "<res>" ...
-deny() { echo "Error from server (Forbidden): mock is forbidden: User \"system:serviceaccount:ci-cd:fds-deployer\" cannot get resource \"mock\" in API group \"\"" >&2; exit 1; }
+# 실측 형식(#5 6회차 D-01): `oc create <kind>` 거부는 "Error from server (Forbidden)" 없이 "error: failed to create …" 로 감싸진다
+deny() {
+  if [[ "${1:-}" == "create "* ]]; then
+    echo "error: failed to create ${1#create }: mock is forbidden: User \"system:serviceaccount:ci-cd:fds-deployer\" cannot create resource \"mock\" in API group \"\" in the namespace \"monitoring-api\"" >&2
+  else
+    echo "Error from server (Forbidden): mock is forbidden: User \"system:serviceaccount:ci-cd:fds-deployer\" cannot get resource \"mock\" in API group \"\"" >&2
+  fi
+  exit 1
+}
 
 # ── 배포 SA 세션(steps.sh 의 _sa = --kubeconfig=.../sa.kubeconfig): Role 대로 허용, 나머지 403
 if [[ "${1:-}" == --kubeconfig=*sa.kubeconfig ]]; then
@@ -278,7 +286,7 @@ WRAPPER="$T/wrapper-nofix.sh" USE_SETSID=1 FORBID_ERR='REVOKE_VERIFIED' run_case
 # PR#40 보완 5: RBAC 이 아닌 403(quota)을 '정상 거부'로 보지 않음 → D-01 에서 STOP
 run_case 30_quota_403_not_rbac_deny template 1 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
 # 대조(30b): 'Forbidden' 만 보던 수정 전 분류는 같은 주입을 정상 거부로 보고 끝까지 통과해 버린다
-perl -0pe 's/elif grep -q \x27\(Forbidden\)\x27 "\$errf" && grep -qF [^\n]*\n[^\n]*then echo DENY/elif grep -q \x27(Forbidden)\x27 "\$errf"; then echo DENY/' "$HERE/steps.sh" >"$T/nofix5.sh"
+perl -0pe 's/elif grep -qF "is forbidden: User [^\n]*\n[^\n]*then echo DENY/elif grep -qi forbidden "\$errf"; then echo DENY/' "$HERE/steps.sh" >"$T/nofix5.sh"
 cmp -s "$HERE/steps.sh" "$T/nofix5.sh" && { echo "FAIL: 30b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 run_case 30b_without_fix_passes nofix5 0 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
 # 리뷰 5530426592 R1: 분류는 범위·binding·roleRef·주체·실제 규칙까지 대조. 각 반례 → 회수 전 STOP, 대조(b)는 수정 전 분류로 통과
@@ -339,6 +347,11 @@ FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 62_ot
 sed 's/ --port=8080//' "$HERE/steps.sh" >"$T/noport.sh"
 cmp -s "$HERE/steps.sh" "$T/noport.sh" && { echo "FAIL: 63b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 FORBID='^oc --kubeconfig=.* get nodes' REQUIRE_ERR='STOP: A-04 expect=ALLOW got=OTHER' run_case 63b_route_without_port_stops_a04 noport 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
+# #5 6회차 D-01: `oc create` 거부는 "(Forbidden)" 없이 "error: failed to create …" 형식 → RBAC 문장 기준이면 DENY.
+# 대조(64b): "(Forbidden)" 을 요구하던 수정 전 분류는 6회차처럼 D-01 에서 멈춘다
+sed 's/elif grep -qF "is forbidden: User /elif grep -q "(Forbidden)" "$errf" \&\& grep -qF "User /' "$HERE/steps.sh" >"$T/needfb.sh"
+cmp -s "$HERE/steps.sh" "$T/needfb.sh" && { echo "FAIL: 64b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+FORBID='^oc --kubeconfig=.* get pods -n openshift-monitoring' REQUIRE_ERR='STOP: D-01 expect=DENY got=OTHER' run_case 64b_need_forbidden_stops_d01 needfb 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 unset FORBID REQUIRE_ERR
 unset FORBID REQUIRE_ERR
 

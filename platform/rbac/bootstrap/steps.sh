@@ -15,10 +15,14 @@ SA_IDENT="system:serviceaccount:ci-cd:fds-deployer"
 # 권한이 있는데 다른 이유로 막힌 것을 '정상 거부'로 오판할 수 있다. RBAC 거부 문장
 #   User "<identity>" cannot <verb> resource "<resource>"
 # 이 정확한 주체로 있을 때만 DENY. [AFTER-CREATE] 실제 ROSA 4.22 거부 메시지 형식을 첫 실행 증적으로 확인.
+# 실측(#5 6회차 D-01): `oc create <kind>` 는 "Error from server (Forbidden)" 없이 아래처럼 감싸서 낸다.
+#   error: failed to create deployment: deployments.apps is forbidden: User "<id>" cannot create resource "deployments" …
+# 그래서 "(Forbidden)" 문구 대신 "is forbidden: User \"<정확한 주체>\" cannot <verb> resource" 문장을 기준으로 본다.
+# quota·webhook 403 은 "is forbidden: exceeded quota …" 처럼 이 문장이 없으므로 계속 OTHER 다.
 _classify() {
   local rc=$1 errf=$2 ident=$3
   if [[ $rc -eq 0 ]]; then echo ALLOW
-  elif grep -q '(Forbidden)' "$errf" && grep -qF "User \"$ident\" cannot " "$errf" \
+  elif grep -qF "is forbidden: User \"$ident\" cannot " "$errf" \
        && grep -qE 'cannot [a-z]+ resource "' "$errf"; then echo DENY
   else echo OTHER; fi
 }

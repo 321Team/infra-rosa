@@ -70,6 +70,12 @@ t C9_wrong_kind_json           1 "$C" "$T/i9" "$T/p1"
 # #5 6258874244: 키트 ClusterRole fds-clusterversion-reader — 정상은 APPROVED(C1), 규칙이 넓어지면(list 추가) STOP
 mk "$T/i10"; echo '{"kind":"ClusterRole","rules":[{"apiGroups":["config.openshift.io"],"resources":["clusterversions"],"resourceNames":["version"],"verbs":["get","list"]}]}' >"$T/i10/clusterrole-fds-clusterversion-reader.json"
 t C10_cv_reader_rules_widened   1 "$C" "$T/i10" "$T/p1"
+# #5 6회차 사전 점검: OpenShift 기본 binding 다수는 authenticated+unauthenticated 를 함께 가진다(예: system:public-info-viewer)
+#   → policy 없으면 PENDING_POLICY(rc3), policy 에 없으면 UNEXPECTED(rc1) — 승인 절차는 그대로
+mk "$T/i11"; printf 'cluster\tsystem:public-info-viewer\tClusterRole\tsystem:public-info-viewer\tGroup:system:authenticated,Group:system:unauthenticated\n' >>"$T/i11/access-paths-hayeoung.tsv"
+echo '{"kind":"ClusterRole"}' >"$T/i11/clusterrole-system:public-info-viewer.json"
+t C11_auth_plus_unauth_pending  3 "$C" "$T/i11" "$T/no-such-policy"
+t C11b_auth_plus_unauth_not_in_policy 1 "$C" "$T/i11" "$T/p1"
 grep -q $'^APPROVED	cluster	hayeoung-clusterversion-reader' "$T/C1_normal.out" 2>/dev/null || { echo "FAIL: C1 에서 clusterversion-reader 가 APPROVED 가 아님"; fail=1; }
 # C7 은 PLATFORM_DEFAULT 로 분류되지 않아야 함
 grep -q '^PLATFORM_DEFAULT' "$T/C7_broken_json_stops.out" 2>/dev/null && { echo "FAIL: C7 이 PLATFORM_DEFAULT 로 분류됨"; fail=1; }
