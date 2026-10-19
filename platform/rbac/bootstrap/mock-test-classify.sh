@@ -15,9 +15,11 @@ cp "$C" "$T/old.sh"
 perl -0pi -e 's/readonly APPROVED_NAMESPACES="fds-app monitoring-api ci-cd"/APPROVED_NAMESPACES="\${APPROVED_NAMESPACES:-fds-app monitoring-api ci-cd}"/;
   s/valid=\$\(awk [^\n]*\n\[\[ "\$valid"[^\n]*\n/[[ \$(grep -vc \x27^#\x27 "\$paths" || true) -gt 0 ]] || { echo "STOP" >&2; exit 1; }\n/;
   s/rules_sha\(\) \{\n.*?\n\}\n/rules_sha() { jq -cS \x27{rules: (.rules \/\/ []), aggregationRule: (.aggregationRule \/\/ null)}\x27 "\$1" | sha256sum | cut -d\x27 \x27 -f1; }\n/s;
-  s/got=\$\(rules_sha "\$rf"\) \|\| \{[^\n]*\}/got=\$(rules_sha "\$rf") || true/' "$T/old.sh"   # 수정 전: 계산 실패를 무시
+  s/got=\$\(rules_sha "\$rf"\) \|\| \{[^\n]*\}/got=\$(rules_sha "\$rf") || true/g' "$T/old.sh"   # 수정 전: 계산 실패를 무시(모든 호출부)
 fail=0
 cmp -s "$C" "$T/old.sh" && { echo "FAIL: 대조 사본이 원본과 같음(치환 실패)"; fail=1; }
+# 대조 사본은 엄격한 해시 실패 처리가 하나도 남지 않아야 '수정 전'을 재현한다(호출부가 늘어도 빠짐없이 치환됐는지)
+grep -q 'got=$(rules_sha "$rf") || {' "$T/old.sh" && { echo "FAIL: 대조 사본에 엄격한 해시 실패 처리가 남아 있음(치환 누락)"; fail=1; }
 
 mk() { # dir — 정상 인벤토리
   local d=$1; mkdir -p "$d"
