@@ -18,7 +18,7 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 | `collect-access-inventory.sh` | ⑩-b 권한 목록 저장(읽기 전용) |
 | `classify-access-paths.sh` | ⑩-b 경로 분류(오프라인 공용 규칙). bootstrap 과 회수 뒤 재판정에서 같은 규칙. 승인 policy 대조, rc 0/3/1 |
 | `post-revoke-check.sh` | ⑫ 회수 뒤 D-11 판정(회수 전 세션 → 새 로그인 → 관리면·SSAR·경로 검토 → 회수 전 세션 정리) |
-| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
+| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` / `mock-test-d11d.sh` / `mock-test-d11d.ps1` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
 
 ## 생성 당일 순서 (요약)
 
@@ -64,40 +64,84 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
    CLUSTER_ID=<id> API_URL=<api url> ./post-revoke-check.sh ~/rosa-idp/evidence-<시각>; echo "rc=$?"
    ```
 4. **D-11d** — 권욱·재환이 **각자 본인 로그인**으로 확인해 #5에 결과를 붙입니다.
-   - **전용 KUBECONFIG 파일로 실행합니다(PR#43 리뷰 S1, GO P9).** 기본 kubeconfig에 로그인하면 Phase 1 공용 OCP context가 있는 파일에 ROSA context가 추가되고 current-context가 바뀝니다. 그러면 이후 Phase 1 명령이 ROSA로 갈 수 있습니다.
-   - `fds-app`·`monitoring-api`는 Phase 1에도 있는 namespace 이름입니다. 그래서 결과에 `oc whoami`·`--show-server`를 반드시 포함합니다. server가 API_URL과 다르면 그 자리에서 중단합니다.
+   - **이번 회차 전용 임시 kubeconfig로 실행하고, 끝나면 실행 전 `KUBECONFIG` 상태로 되돌립니다(PR#43 리뷰 S1·B1, GO P9).**
+     - 기본 kubeconfig에 로그인하면 Phase 1 공용 OCP context가 있는 파일에 ROSA context가 추가되고 current-context가 바뀝니다.
+     - `KUBECONFIG` 환경변수로 Phase 1 파일을 지정해 쓰고 있었다면, 그 지정도 실행 뒤 그대로 남아 있어야 합니다. 그래서 Bash는 **서브셸 `( … )`** 안에서 실행하고, PowerShell은 **`finally`에서 원래 값을 먼저 복원**합니다.
+     - kubeconfig는 고정 경로가 아니라 `mktemp -d`(PowerShell은 임시 폴더 + GUID)로 이번 회차 전용 파일을 만들고, 끝나면 그 파일과 폴더만 지웁니다.
+   - `fds-app`·`monitoring-api`는 Phase 1에도 있는 namespace 이름입니다. 로그인 뒤 **`oc whoami` = 본인 ID, `oc whoami --show-server` = 승인 API**를 둘 다 확인하고, 하나라도 다르면 권한 확인을 하지 않고 중단합니다. 두 값은 결과에 포함합니다.
+   - `can-i` 4개는 기대값(yes/no)과 rc를 함께 확인하고 출력합니다. 하나라도 다르면 FAIL입니다.
+   - 실행 전에 `<승인 API_URL>`(실행 카드 값)과 `<본인 id>`(`gwonuk` 또는 `jaehwan`)를 바꿉니다.
    - 증적 표기: "계정 소유자가 실행, 비밀번호는 IdP 관리자도 앎"(GO §2).
 
-   bash(CloudShell·Linux·Git Bash):
+   bash(CloudShell·Linux·Git Bash) — 마지막 줄의 `D-11d rc=0`이 PASS입니다:
+<!-- d11d-bash:start -->
    ```bash
-   export KUBECONFIG="$HOME/.kube/rosa-d11d"          # 전용 파일. 기존 kubeconfig 는 건드리지 않음
-   API_URL=<실행 카드의 API_URL>
-   oc login "$API_URL" -u <본인 id>
-   oc whoami; oc whoami --show-server                 # 결과에 포함
-   if [ "$(oc whoami --show-server)" = "$API_URL" ]; then
-     oc auth can-i get pods -n fds-app                # yes
-     oc auth can-i create deployments -n fds-app      # no
-     oc auth can-i list nodes                         # no
-     oc auth can-i get secrets -n fds-app             # no
-   else
-     echo "STOP: server 불일치 — 확인 명령을 실행하지 않음"
-   fi
-   oc logout; rm -f "$KUBECONFIG"; unset KUBECONFIG   # 전용 파일 정리(결과와 관계없이)
+   (
+     umask 077
+     d11_dir=$(mktemp -d) || exit 1
+     export KUBECONFIG="$d11_dir/kubeconfig"
+     trap 'oc logout >/dev/null 2>&1 || true; rm -f -- "$KUBECONFIG"; rmdir -- "$d11_dir"' EXIT
+     API_URL="<승인 API_URL>"
+     EXPECTED_USER="<본인 id>"
+     oc login "$API_URL" -u "$EXPECTED_USER" || exit 1
+     actual_user=$(oc whoami) || exit 1
+     actual_server=$(oc whoami --show-server) || exit 1
+     printf 'USER=%s\nSERVER=%s\n' "$actual_user" "$actual_server"
+     [ "$actual_user" = "$EXPECTED_USER" ] && [ "$actual_server" = "$API_URL" ] || exit 1
+     check_can_i() {
+       local want=$1 got rc=0; shift
+       got=$(oc auth can-i "$@") || rc=$?
+       printf 'can-i %s => %s (rc=%s)\n' "$*" "$got" "$rc"
+       [[ "$want" == yes && $rc == 0 && "$got" == yes ]] ||
+         [[ "$want" == no && $rc == 1 && "$got" == no ]]
+     }
+     check_can_i yes get pods -n fds-app           || exit 1
+     check_can_i no create deployments -n fds-app  || exit 1
+     check_can_i no list nodes                    || exit 1
+     check_can_i no get secrets -n fds-app         || exit 1
+   )
+   echo "D-11d rc=$?"
    ```
-   PowerShell(Windows):
+<!-- d11d-bash:end -->
+   PowerShell(Windows) — 마지막 줄의 `D-11d RESULT: PASS`가 PASS입니다:
+<!-- d11d-ps:start -->
    ```powershell
-   $env:KUBECONFIG = "$HOME\.kube\rosa-d11d"
-   $API_URL = "<실행 카드의 API_URL>"
-   oc login $API_URL -u <본인 id>
-   oc whoami; oc whoami --show-server
-   if ((oc whoami --show-server) -eq $API_URL) {
-     oc auth can-i get pods -n fds-app
-     oc auth can-i create deployments -n fds-app
-     oc auth can-i list nodes
-     oc auth can-i get secrets -n fds-app
-   } else { "STOP: server 불일치 — 확인 명령을 실행하지 않음" }
-   oc logout; Remove-Item $env:KUBECONFIG; Remove-Item Env:KUBECONFIG
+   $d11HadConfig = Test-Path Env:KUBECONFIG
+   $d11PreviousConfig = $env:KUBECONFIG
+   $d11Directory = Join-Path ([IO.Path]::GetTempPath()) ("rosa-d11d-" + [guid]::NewGuid().ToString("N"))
+   New-Item -ItemType Directory -Path $d11Directory -ErrorAction Stop | Out-Null
+   $d11Config = Join-Path $d11Directory "kubeconfig"
+   $d11Ok = $false
+   try {
+     $env:KUBECONFIG = $d11Config
+     $API_URL = "<승인 API_URL>"
+     $EXPECTED_USER = "<본인 id>"
+     oc login $API_URL -u $EXPECTED_USER
+     if ($LASTEXITCODE -ne 0) { throw "STOP: 로그인 실패" }
+     $actualUser = oc whoami
+     if ($LASTEXITCODE -ne 0) { throw "STOP: whoami 실패" }
+     $actualServer = oc whoami --show-server
+     if ($LASTEXITCODE -ne 0) { throw "STOP: server 조회 실패" }
+     "USER=$actualUser"; "SERVER=$actualServer"
+     if ($actualUser -ne $EXPECTED_USER -or $actualServer -ne $API_URL) { throw "STOP: 사용자 또는 server 불일치" }
+     foreach ($c in @(@('yes','get','pods','-n','fds-app'), @('no','create','deployments','-n','fds-app'),
+                      @('no','list','nodes'), @('no','get','secrets','-n','fds-app'))) {
+       $want = $c[0]; $args2 = $c[1..($c.Count - 1)]
+       $got = oc auth can-i @args2; $rc = $LASTEXITCODE
+       "can-i $($args2 -join ' ') => $got (rc=$rc)"
+       if (-not (($want -eq 'yes' -and $rc -eq 0 -and $got -eq 'yes') -or ($want -eq 'no' -and $rc -eq 1 -and $got -eq 'no'))) {
+         throw "STOP: can-i 기대값 불일치($($args2 -join ' '))"
+       }
+     }
+     $d11Ok = $true
+   } finally {
+     if ($d11HadConfig) { $env:KUBECONFIG = $d11PreviousConfig } else { Remove-Item Env:KUBECONFIG -ErrorAction SilentlyContinue }
+     if (Test-Path -LiteralPath $d11Config) { oc --kubeconfig $d11Config logout | Out-Null; Remove-Item -LiteralPath $d11Config }
+     Remove-Item -LiteralPath $d11Directory -ErrorAction SilentlyContinue
+     if ($d11Ok) { "D-11d RESULT: PASS" } else { "D-11d RESULT: FAIL" }
+   }
    ```
+<!-- d11d-ps:end -->
 5. 증적을 `fds-project-evidence` `evidence/P2-ROSA-01/`로 PR 편입(독립 리뷰)하고, #4 Handoff 4·5에 제공합니다.
    - **반출 대상(PR#43 리뷰 S3)**: 아래 전부를 묶고, 묶음 안에 `SHA256SUMS`를 넣은 뒤 공유 사본을 재해시합니다.
      - `~/rosa-idp/bootstrap.log` — 래퍼 로그
@@ -160,6 +204,8 @@ bash platform/rbac/bootstrap/mock-test-inventory.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-post.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-classify.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-receipt.sh; echo "rc=$?"   # jq 불필요
+bash platform/rbac/bootstrap/mock-test-d11d.sh; echo "rc=$?"      # README D-11d Bash 예시 그대로 실행, jq 불필요
+# Windows: powershell -NoProfile -ExecutionPolicy Bypass -File platform/rbac/bootstrap/mock-test-d11d.ps1   # README D-11d PowerShell 예시
 ```
 
 ## 경계
