@@ -46,10 +46,11 @@ trap cleanup_new EXIT
 
 # 요청 분류: ALLOW / DENY(RBAC 403) / UNAUTH(401) / OTHER
 # DENY 는 "(Forbidden)" 만으로 인정하지 않고 RBAC 거부 문장(User "<U>" cannot <verb> resource "...")일 때만(PR#40 보완 5).
+# steps.sh 와 같은 기준: "(Forbidden)" 문구 유무가 아니라 "is forbidden: User \"<U>\" cannot …" 문장으로 본다(#5 6회차 D-01).
 cls() {
   local rc=$1 errf=$2
   if [[ $rc -eq 0 ]]; then echo ALLOW
-  elif grep -q '(Forbidden)' "$errf" && grep -qF "User \"$U\" cannot " "$errf" \
+  elif grep -qF "is forbidden: User \"$U\" cannot " "$errf" \
        && grep -qE 'cannot [a-z]+ resource "' "$errf"; then echo DENY
   elif grep -Eq 'Unauthorized|must be logged in' "$errf"; then echo UNAUTH
   else echo OTHER; fi
@@ -67,8 +68,14 @@ run() { # id kubeconfig expect_set(예: DENY|UNAUTH) -- cmd...
 cani() { # id kubeconfig -- can-i args (정확한 no 만 PASS)
   cani_want no "$@"
 }
-# stderr 가 비었거나 cluster 범위 경고 1종(과 빈 줄)뿐이면 참 — steps.sh 와 같은 규칙(#5 3회차 J-7 6264116497)
-_scope_warning_only() { ! grep -qvE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped)?$" "$1"; }
+# stderr 가 비었거나 scope 경고(+선택적 그룹 접미사)와 빈 줄뿐이면 참 — steps.sh 와 같은 규칙(#5 3회차 J-7, 4회차 H-2, PR#46 R1)
+_scope_warning_only() {
+  # PR#46 리뷰 5571119164 R1·C1(이권욱 제안): 정확한 scope 경고(+선택적 그룹 접미사)와 빈 줄만 허용한다.
+  # 다른 Warning(예: 알 수 없는 리소스)은 OTHER. grep 읽기 오류(rc2)를 '경고뿐'으로 뒤집지 않도록 rc1 만 참.
+  local rc=0
+  grep -vE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped( in group '[a-z0-9.-]+')?)?$" "$1" >/dev/null || rc=$?
+  [[ $rc -eq 1 ]]
+}
 cani_want() { # want(yes|no) id kubeconfig -- can-i args — 정확한 yes/no 와 rc 가 기대와 같아야 PASS
   local want=$1 id=$2 kc=$3; shift 4
   local rc=0 got=OTHER

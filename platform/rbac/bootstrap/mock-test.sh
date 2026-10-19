@@ -45,11 +45,21 @@ cat >"$T/bin/oc" <<'EOF'
 #!/usr/bin/env bash
 echo "oc $*" >>"$MOCK_LOG"
 # 실제 RBAC 거부 형식: ... is forbidden: User "<주체>" cannot <verb> resource "<res>" ...
-deny() { echo "Error from server (Forbidden): mock is forbidden: User \"system:serviceaccount:ci-cd:fds-deployer\" cannot get resource \"mock\" in API group \"\"" >&2; exit 1; }
+# 실측 형식(#5 6회차 D-01): `oc create <kind>` 거부는 "Error from server (Forbidden)" 없이 "error: failed to create …" 로 감싸진다
+deny() {
+  if [[ "${1:-}" == "create "* ]]; then
+    echo "error: failed to create ${1#create }: mock is forbidden: User \"system:serviceaccount:ci-cd:fds-deployer\" cannot create resource \"mock\" in API group \"\" in the namespace \"monitoring-api\"" >&2
+  else
+    echo "Error from server (Forbidden): mock is forbidden: User \"system:serviceaccount:ci-cd:fds-deployer\" cannot get resource \"mock\" in API group \"\"" >&2
+  fi
+  exit 1
+}
 
 # ── 배포 SA 세션(steps.sh 의 _sa = --kubeconfig=.../sa.kubeconfig): Role 대로 허용, 나머지 403
 if [[ "${1:-}" == --kubeconfig=*sa.kubeconfig ]]; then
   shift; a="$*"
+  # 실측(#5 5회차 A-04): 없는 서비스로 route 를 만들 때 --port 가 없으면 oc 가 서버 요청 전에 클라이언트 오류로 끝난다
+  if [[ "$a" == "create route edge "* && "$a" != *"--port="* ]]; then echo "error: you need to provide a route port via --port when exposing a non-existent service" >&2; exit 1; fi
   case "$a" in
     "whoami") echo "system:serviceaccount:ci-cd:fds-deployer"; exit 0 ;;
     "auth can-i "*) echo no; exit 1 ;;
@@ -71,8 +81,11 @@ fi
 # 61·61b·62 / P35·P36: 기본 project 가 있는 세션에서 cluster 범위 can-i(-n·--all-namespaces·--list 없음)에 oc 가 내는 경고 주입
 if [[ "${1:-} ${2:-}" == "auth can-i" && " $* " != *" -n "* && "$*" != *--all-namespaces* && "$*" != *--list* ]]; then
   case "${MOCK_SCOPE_WARN:-0}" in
-    1)     printf "Warning: resource '%s' is not namespace scoped\n\n" "${4%%/*}" >&2 ;;
-    other) echo "Warning: unexpected server notice" >&2 ;;
+    1)     r="${4%%/*}"   # 실측 형식: 그룹 있는 자원은 끝에 " in group '<g>'" 가 붙는다(4회차 H-2)
+           if [[ "$r" == *.* ]]; then printf "Warning: resource '%s' is not namespace scoped in group '%s'\n\n" "${r%%.*}" "${r#*.}" >&2
+           else printf "Warning: resource '%s' is not namespace scoped\n\n" "$r" >&2; fi ;;
+    other) echo "error: unexpected server response" >&2 ;;
+    unknown) echo "Warning: the server doesn't have a resource type 'nodez'" >&2 ;;   # PR#46 R1: 다른 Warning 은 OTHER
   esac
 fi
 # ⑨ `oc auth can-i --list` 는 실제로 권한 표를 출력하고 rc0 (SSAR yes/no 질의와 다름)
@@ -274,7 +287,7 @@ WRAPPER="$T/wrapper-nofix.sh" USE_SETSID=1 FORBID_ERR='REVOKE_VERIFIED' run_case
 # PR#40 보완 5: RBAC 이 아닌 403(quota)을 '정상 거부'로 보지 않음 → D-01 에서 STOP
 run_case 30_quota_403_not_rbac_deny template 1 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
 # 대조(30b): 'Forbidden' 만 보던 수정 전 분류는 같은 주입을 정상 거부로 보고 끝까지 통과해 버린다
-perl -0pe 's/elif grep -q \x27\(Forbidden\)\x27 "\$errf" && grep -qF [^\n]*\n[^\n]*then echo DENY/elif grep -q \x27(Forbidden)\x27 "\$errf"; then echo DENY/' "$HERE/steps.sh" >"$T/nofix5.sh"
+perl -0pe 's/elif grep -qF "is forbidden: User [^\n]*\n[^\n]*then echo DENY/elif grep -qi forbidden "\$errf"; then echo DENY/' "$HERE/steps.sh" >"$T/nofix5.sh"
 cmp -s "$HERE/steps.sh" "$T/nofix5.sh" && { echo "FAIL: 30b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 run_case 30b_without_fix_passes nofix5 0 MOCK_TOKEN=1 MOCK_SA_QUOTA=1
 # 리뷰 5530426592 R1: 분류는 범위·binding·roleRef·주체·실제 규칙까지 대조. 각 반례 → 회수 전 STOP, 대조(b)는 수정 전 분류로 통과
@@ -320,13 +333,28 @@ REQUIRE_ERR='GRANT_EFFECTIVE try=3' run_case 59_grant_wait_no_then_yes template 
 # C1: 기록 파일(session-events.log)을 쓸 수 없으면 grant 전에 STOP — grant·revoke 0회
 mkdir -p "$T/home-60_event_log_fail_before_grant/rosa-idp/session-events.log"
 EXP_GRANT=0 EXP_REVOKE=0 REQUIRE_ERR='grant 전에 중단' run_case 60_event_log_fail_before_grant normal 1
-# #5 3회차 J-7(6264116497): cluster 범위 can-i 의 scope 경고 1종은 판정에 영향 없음 → 끝까지 rc0. 다른 stderr 는 계속 판정 불가 → STOP
+# #5 3회차 J-7(6264116497)·4회차 H-2: cluster 범위 can-i 의 `Warning:` 줄(그룹 접미사 포함)은 판정에 영향 없음 → 끝까지 rc0. `error:` 등 다른 stderr 는 STOP
 run_case 61_scope_warning_accepted template 0 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 # 대조(61b): 수정 전 판정(stderr 가 있으면 OTHER)은 같은 경고로 3회차처럼 J-7 에서 멈춘다
 sed 's/ \&\& _scope_warning_only "\$err" \&\& got=no$/ \&\& [[ ! -s "$err" ]] \&\& got=no/' "$HERE/steps.sh" >"$T/noscope.sh"
 cmp -s "$HERE/steps.sh" "$T/noscope.sh" && { echo "FAIL: 61b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 61b_without_fix_stops_j7 noscope 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
+# 대조(61c): 그룹 접미사를 허용하지 않는 규칙(PR#45 형태)은 그룹 접미사 경고로 4회차처럼 H-2 에서 멈춘다
+sed "s/( in group '\[a-z0-9.-\]+')?//" "$HERE/steps.sh" >"$T/narrow.sh"
+cmp -s "$HERE/steps.sh" "$T/narrow.sh" && { echo "FAIL: 61c 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+FORBID='create token' REQUIRE_ERR='STOP: H-2 expect=no got=OTHER' run_case 61c_narrow_rule_stops_h2 narrow 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 62_other_stderr_still_stops template 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=other
+# #5 5회차 A-04: route 시험에 --port 가 없으면 클라이언트 오류로 권한 판정 전에 STOP. 대조(63b)는 수정 전 명령이 5회차처럼 A-04 에서 멈춘다
+sed 's/ --port=8080//' "$HERE/steps.sh" >"$T/noport.sh"
+cmp -s "$HERE/steps.sh" "$T/noport.sh" && { echo "FAIL: 63b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+FORBID='^oc --kubeconfig=.* get nodes' REQUIRE_ERR='STOP: A-04 expect=ALLOW got=OTHER' run_case 63b_route_without_port_stops_a04 noport 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
+# #5 6회차 D-01: `oc create` 거부는 "(Forbidden)" 없이 "error: failed to create …" 형식 → RBAC 문장 기준이면 DENY.
+# 대조(64b): "(Forbidden)" 을 요구하던 수정 전 분류는 6회차처럼 D-01 에서 멈춘다
+sed 's/elif grep -qF "is forbidden: User /elif grep -q "(Forbidden)" "$errf" \&\& grep -qF "User /' "$HERE/steps.sh" >"$T/needfb.sh"
+cmp -s "$HERE/steps.sh" "$T/needfb.sh" && { echo "FAIL: 64b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+FORBID='^oc --kubeconfig=.* get pods -n openshift-monitoring' REQUIRE_ERR='STOP: D-01 expect=DENY got=OTHER' run_case 64b_need_forbidden_stops_d01 needfb 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
+# PR#46 R1: scope 경고가 아닌 Warning(예: 알 수 없는 리소스)은 정상 거부로 보지 않는다 → J-7 에서 STOP
+FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 65_other_warning_stops template 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=unknown
 unset FORBID REQUIRE_ERR
 unset FORBID REQUIRE_ERR
 

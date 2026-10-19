@@ -15,10 +15,14 @@ SA_IDENT="system:serviceaccount:ci-cd:fds-deployer"
 # 권한이 있는데 다른 이유로 막힌 것을 '정상 거부'로 오판할 수 있다. RBAC 거부 문장
 #   User "<identity>" cannot <verb> resource "<resource>"
 # 이 정확한 주체로 있을 때만 DENY. [AFTER-CREATE] 실제 ROSA 4.22 거부 메시지 형식을 첫 실행 증적으로 확인.
+# 실측(#5 6회차 D-01): `oc create <kind>` 는 "Error from server (Forbidden)" 없이 아래처럼 감싸서 낸다.
+#   error: failed to create deployment: deployments.apps is forbidden: User "<id>" cannot create resource "deployments" …
+# 그래서 "(Forbidden)" 문구 대신 "is forbidden: User \"<정확한 주체>\" cannot <verb> resource" 문장을 기준으로 본다.
+# quota·webhook 403 은 "is forbidden: exceeded quota …" 처럼 이 문장이 없으므로 계속 OTHER 다.
 _classify() {
   local rc=$1 errf=$2 ident=$3
   if [[ $rc -eq 0 ]]; then echo ALLOW
-  elif grep -q '(Forbidden)' "$errf" && grep -qF "User \"$ident\" cannot " "$errf" \
+  elif grep -qF "is forbidden: User \"$ident\" cannot " "$errf" \
        && grep -qE 'cannot [a-z]+ resource "' "$errf"; then echo DENY
   else echo OTHER; fi
 }
@@ -34,9 +38,17 @@ expect() {
   [[ "$got" == "$want" ]] || { log "STOP: $id expect=$want got=$got rc=$rc"; return 1; }
 }
 
-# stderr 가 비었거나, cluster 범위 자원 질의에 oc 가 내는 아래 경고 1종(과 빈 줄)뿐이면 참. 그 밖의 stderr 는 판정 불가(#5 3회차 J-7 6264116497).
-#   Warning: resource 'nodes' is not namespace scoped   ← 세션 기본 project 가 있을 때 nodes·clusterversions 질의에서 나옴
-_scope_warning_only() { ! grep -qvE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped)?$" "$1"; }
+# stderr 가 비었거나 아래 scope 경고(+선택적 그룹 접미사)와 빈 줄뿐이면 참. 그 밖의 Warning·error 는 판정 불가.
+#   #5 3회차 J-7(6264116497)·4회차 H-2: 세션 기본 project 때문에 cluster 범위 자원 질의에 아래와 같은 경고가 붙는다(그룹 접미사 포함).
+#   Warning: resource 'nodes' is not namespace scoped
+#   Warning: resource 'clusterversions' is not namespace scoped in group 'config.openshift.io'
+_scope_warning_only() {
+  # PR#46 리뷰 5571119164 R1·C1(이권욱 제안): 정확한 scope 경고(+선택적 그룹 접미사)와 빈 줄만 허용한다.
+  # 다른 Warning(예: 알 수 없는 리소스)은 OTHER. grep 읽기 오류(rc2)를 '경고뿐'으로 뒤집지 않도록 rc1 만 참.
+  local rc=0
+  grep -vE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped( in group '[a-z0-9.-]+')?)?$" "$1" >/dev/null || rc=$?
+  [[ $rc -eq 1 ]]
+}
 
 # expect_cani <id> <yes|no> <subject> -- <oc auth can-i args...>  (SSAR/SAR: 정확한 yes/no 만 인정)
 expect_cani() {
@@ -210,11 +222,12 @@ run_steps() {
 
   # 허용(A)·거부(D) — 실제 SA token 요청. 쓰기는 --dry-run=server. DENY 는 이 SA 주체의 RBAC 거부 문장일 때만 인정.
   local S="$SA_IDENT"
+  # route 시험은 --port 를 준다: 없는 서비스(--service=none)에 포트가 없으면 oc 가 서버 요청 전에 "error: you need to provide a route port via --port …" 로 끝나 권한 판정을 못 한다(#5 5회차 A-04).
   expect A-01 ALLOW "$S" -- _sa create deployment a01-probe --image=registry.invalid/probe:0 -n fds-app --dry-run=server
   expect A-03 ALLOW "$S" -- _sa get pods -n fds-app
-  expect A-04 ALLOW "$S" -- _sa create route edge a04-probe --service=none -n fds-app --dry-run=server
+  expect A-04 ALLOW "$S" -- _sa create route edge a04-probe --service=none --port=8080 -n fds-app --dry-run=server
   if [[ -n "${ROUTE_HOST:-}" ]]; then
-    expect A-09 ALLOW "$S" -- _sa create route edge a09-probe --service=none --hostname="$ROUTE_HOST" -n fds-app --dry-run=server
+    expect A-09 ALLOW "$S" -- _sa create route edge a09-probe --service=none --port=8080 --hostname="$ROUTE_HOST" -n fds-app --dry-run=server
   else
     printf 'A-09\t%s\troute custom-host create\tALLOW\tNOT_RUN(승인 host PENDING)\t-\n' "$S" >>"$EV/results.tsv"
   fi
@@ -230,7 +243,7 @@ run_steps() {
   expect D-07c  DENY "$S" -- _sa get securitycontextconstraints restricted-v2
   expect D-12a  DENY "$S" -- _sa create serviceaccount d12-probe -n fds-app --dry-run=server
   expect D-12b  DENY "$S" -- _np_probe
-  expect D-13c  DENY "$S" -- _sa create route edge d13-probe --service=none --hostname=probe.invalid -n monitoring-api --dry-run=server
+  expect D-13c  DENY "$S" -- _sa create route edge d13-probe --service=none --port=8080 --hostname=probe.invalid -n monitoring-api --dry-run=server
   expect_cani MON-D-14 no "$S" -- _sa auth can-i create servicemonitors.monitoring.coreos.com -n fds-app
   rm -f -- "$WORKDIR/sa.kubeconfig"   # 정상 경로 정리. 실패로 중간에 끝나도 래퍼 cleanup 이 t·sa.kubeconfig 를 지운다(보완 1)
   # D-10(실제 만료 후 401)은 15분 대기가 필요해 bootstrap 창 밖, post-revoke-check.sh 이후 별도 기록.

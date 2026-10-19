@@ -9,7 +9,8 @@
 #   APPROVED         승인 namespace(정확히 3개)의 <user>-admin = ClusterRole/admin, 주체 정확히 User:<user>
 #                    + fds-app 의 <user>-monitoring-edit = ClusterRole/monitoring-edit(⑮ 회차 뒤에만 존재)
 #   REVOKE_TARGET    cluster 범위 ClusterRole/cluster-admin, 주체 정확히 Group:cluster-admins (⑪에서 회수)
-#   PLATFORM_DEFAULT 주체가 system:authenticated(:oauth) 그룹뿐이고, policy 에 같은 scope·binding·roleRef·주체 행이 있으며
+#   PLATFORM_DEFAULT 주체가 system:authenticated(:oauth)·system:unauthenticated 그룹뿐이고(#5 6회차: OpenShift 기본
+#                    binding 다수가 authenticated+unauthenticated 를 함께 가짐), policy 에 같은 scope·binding·roleRef·주체 행이 있으며
 #                    수집된 ClusterRole 의 rules+aggregationRule sha256 이 policy 값과 같을 때만
 #   PENDING_POLICY   위 기본 binding 형태인데 policy 파일이 아직 없음(AFTER-CREATE 승인 대기)
 #   UNEXPECTED       그 밖의 전부(policy 에 없는 기본 binding, 같은 이름인데 규칙이 바뀜, ClusterRole 파일 누락, 형식 오류 포함)
@@ -48,7 +49,7 @@ rules_sha() {
   [[ "$out" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s\n' "$out"
 }
-auth_re='^Group:system:authenticated(:oauth)?(,Group:system:authenticated(:oauth)?)*$'
+auth_re='^Group:system:(authenticated(:oauth)?|unauthenticated)(,Group:system:(authenticated(:oauth)?|unauthenticated))*$'
 
 # 키트 manifest(human-bindings.yaml)의 fds-clusterversion-reader 규칙을 같은 정규화로 해시한 기대값.
 # manifest 를 바꾸면 이 JSON 도 같은 PR 에서 같이 바꾼다.

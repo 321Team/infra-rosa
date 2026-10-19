@@ -27,8 +27,11 @@ fi
 # 61·61b·62 / P35·P36: 기본 project 가 있는 세션에서 cluster 범위 can-i(-n·--all-namespaces·--list 없음)에 oc 가 내는 경고 주입
 if [[ "${1:-} ${2:-}" == "auth can-i" && " $* " != *" -n "* && "$*" != *--all-namespaces* && "$*" != *--list* ]]; then
   case "${MOCK_SCOPE_WARN:-0}" in
-    1)     printf "Warning: resource '%s' is not namespace scoped\n\n" "${4%%/*}" >&2 ;;
-    other) echo "Warning: unexpected server notice" >&2 ;;
+    1)     r="${4%%/*}"   # 실측 형식: 그룹 있는 자원은 끝에 " in group '<g>'" 가 붙는다(4회차 H-2)
+           if [[ "$r" == *.* ]]; then printf "Warning: resource '%s' is not namespace scoped in group '%s'\n\n" "${r%%.*}" "${r#*.}" >&2
+           else printf "Warning: resource '%s' is not namespace scoped\n\n" "$r" >&2; fi ;;
+    other) echo "error: unexpected server response" >&2 ;;
+    unknown) echo "Warning: the server doesn't have a resource type 'nodez'" >&2 ;;   # PR#46 R1: 다른 Warning 은 OTHER
   esac
 fi
 case "$a" in
@@ -192,4 +195,5 @@ case_ P33_mgmt_empty_info_stderr    1 MOCK_USERS_MODE=noneinfo MOCK_USERS_ERR='W
 # #5 3회차 J-7(6264116497): 새 세션 cluster 범위 can-i(D-11c-crb·node, D-11a-cv-*)의 scope 경고 1종은 PASS 판정에 영향 없음. 다른 stderr 는 FAIL
 case_ P35_scope_warning_accepted    0 MOCK_SCOPE_WARN=1
 case_ P36_other_stderr_fails        1 MOCK_SCOPE_WARN=other
+case_ P37_other_warning_fails       1 MOCK_SCOPE_WARN=unknown   # PR#46 R1: scope 경고가 아닌 Warning 은 FAIL
 exit "$fail"
