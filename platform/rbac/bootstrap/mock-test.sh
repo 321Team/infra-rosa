@@ -71,8 +71,10 @@ fi
 # 61·61b·62 / P35·P36: 기본 project 가 있는 세션에서 cluster 범위 can-i(-n·--all-namespaces·--list 없음)에 oc 가 내는 경고 주입
 if [[ "${1:-} ${2:-}" == "auth can-i" && " $* " != *" -n "* && "$*" != *--all-namespaces* && "$*" != *--list* ]]; then
   case "${MOCK_SCOPE_WARN:-0}" in
-    1)     printf "Warning: resource '%s' is not namespace scoped\n\n" "${4%%/*}" >&2 ;;
-    other) echo "Warning: unexpected server notice" >&2 ;;
+    1)     r="${4%%/*}"   # 실측 형식: 그룹 있는 자원은 끝에 " in group '<g>'" 가 붙는다(4회차 H-2)
+           if [[ "$r" == *.* ]]; then printf "Warning: resource '%s' is not namespace scoped in group '%s'\n\n" "${r%%.*}" "${r#*.}" >&2
+           else printf "Warning: resource '%s' is not namespace scoped\n\n" "$r" >&2; fi ;;
+    other) echo "error: unexpected server response" >&2 ;;
   esac
 fi
 # ⑨ `oc auth can-i --list` 는 실제로 권한 표를 출력하고 rc0 (SSAR yes/no 질의와 다름)
@@ -320,12 +322,16 @@ REQUIRE_ERR='GRANT_EFFECTIVE try=3' run_case 59_grant_wait_no_then_yes template 
 # C1: 기록 파일(session-events.log)을 쓸 수 없으면 grant 전에 STOP — grant·revoke 0회
 mkdir -p "$T/home-60_event_log_fail_before_grant/rosa-idp/session-events.log"
 EXP_GRANT=0 EXP_REVOKE=0 REQUIRE_ERR='grant 전에 중단' run_case 60_event_log_fail_before_grant normal 1
-# #5 3회차 J-7(6264116497): cluster 범위 can-i 의 scope 경고 1종은 판정에 영향 없음 → 끝까지 rc0. 다른 stderr 는 계속 판정 불가 → STOP
+# #5 3회차 J-7(6264116497)·4회차 H-2: cluster 범위 can-i 의 `Warning:` 줄(그룹 접미사 포함)은 판정에 영향 없음 → 끝까지 rc0. `error:` 등 다른 stderr 는 STOP
 run_case 61_scope_warning_accepted template 0 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 # 대조(61b): 수정 전 판정(stderr 가 있으면 OTHER)은 같은 경고로 3회차처럼 J-7 에서 멈춘다
 sed 's/ \&\& _scope_warning_only "\$err" \&\& got=no$/ \&\& [[ ! -s "$err" ]] \&\& got=no/' "$HERE/steps.sh" >"$T/noscope.sh"
 cmp -s "$HERE/steps.sh" "$T/noscope.sh" && { echo "FAIL: 61b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 61b_without_fix_stops_j7 noscope 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
+# 대조(61c): PR#45 의 좁은 규칙(" is not namespace scoped" 로 끝나는 경고만)은 그룹 접미사 경고로 4회차처럼 H-2 에서 멈춘다
+sed "s/^_scope_warning_only() .*/_scope_warning_only() { ! grep -qvE \"^(Warning: resource '[a-z0-9.-]+' is not namespace scoped)?\$\" \"\$1\"; }/" "$HERE/steps.sh" >"$T/narrow.sh"
+cmp -s "$HERE/steps.sh" "$T/narrow.sh" && { echo "FAIL: 61c 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+FORBID='create token' REQUIRE_ERR='STOP: H-2 expect=no got=OTHER' run_case 61c_narrow_rule_stops_h2 narrow 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 62_other_stderr_still_stops template 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=other
 unset FORBID REQUIRE_ERR
 unset FORBID REQUIRE_ERR

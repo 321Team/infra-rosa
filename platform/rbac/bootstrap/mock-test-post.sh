@@ -27,8 +27,10 @@ fi
 # 61·61b·62 / P35·P36: 기본 project 가 있는 세션에서 cluster 범위 can-i(-n·--all-namespaces·--list 없음)에 oc 가 내는 경고 주입
 if [[ "${1:-} ${2:-}" == "auth can-i" && " $* " != *" -n "* && "$*" != *--all-namespaces* && "$*" != *--list* ]]; then
   case "${MOCK_SCOPE_WARN:-0}" in
-    1)     printf "Warning: resource '%s' is not namespace scoped\n\n" "${4%%/*}" >&2 ;;
-    other) echo "Warning: unexpected server notice" >&2 ;;
+    1)     r="${4%%/*}"   # 실측 형식: 그룹 있는 자원은 끝에 " in group '<g>'" 가 붙는다(4회차 H-2)
+           if [[ "$r" == *.* ]]; then printf "Warning: resource '%s' is not namespace scoped in group '%s'\n\n" "${r%%.*}" "${r#*.}" >&2
+           else printf "Warning: resource '%s' is not namespace scoped\n\n" "$r" >&2; fi ;;
+    other) echo "error: unexpected server response" >&2 ;;
   esac
 fi
 case "$a" in

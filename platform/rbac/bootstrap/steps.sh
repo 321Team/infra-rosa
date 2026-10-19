@@ -34,9 +34,11 @@ expect() {
   [[ "$got" == "$want" ]] || { log "STOP: $id expect=$want got=$got rc=$rc"; return 1; }
 }
 
-# stderr 가 비었거나, cluster 범위 자원 질의에 oc 가 내는 아래 경고 1종(과 빈 줄)뿐이면 참. 그 밖의 stderr 는 판정 불가(#5 3회차 J-7 6264116497).
-#   Warning: resource 'nodes' is not namespace scoped   ← 세션 기본 project 가 있을 때 nodes·clusterversions 질의에서 나옴
-_scope_warning_only() { ! grep -qvE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped)?$" "$1"; }
+# stderr 가 비었거나 `Warning:` 으로 시작하는 줄(과 빈 줄)뿐이면 참. `error:`·`Error from server` 등 그 밖의 stderr 는 판정 불가.
+#   #5 3회차 J-7(6264116497)·4회차 H-2: 세션 기본 project 때문에 cluster 범위 자원 질의에 아래와 같은 경고가 붙는다(그룹 접미사 포함).
+#   Warning: resource 'nodes' is not namespace scoped
+#   Warning: resource 'clusterversions' is not namespace scoped in group 'config.openshift.io'
+_scope_warning_only() { ! grep -qvE "^(Warning: .*)?$" "$1"; }
 
 # expect_cani <id> <yes|no> <subject> -- <oc auth can-i args...>  (SSAR/SAR: 정확한 yes/no 만 인정)
 expect_cani() {

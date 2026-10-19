@@ -67,8 +67,8 @@ run() { # id kubeconfig expect_set(예: DENY|UNAUTH) -- cmd...
 cani() { # id kubeconfig -- can-i args (정확한 no 만 PASS)
   cani_want no "$@"
 }
-# stderr 가 비었거나 cluster 범위 경고 1종(과 빈 줄)뿐이면 참 — steps.sh 와 같은 규칙(#5 3회차 J-7 6264116497)
-_scope_warning_only() { ! grep -qvE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped)?$" "$1"; }
+# stderr 가 비었거나 `Warning:` 줄(과 빈 줄)뿐이면 참 — steps.sh 와 같은 규칙(#5 3회차 J-7, 4회차 H-2)
+_scope_warning_only() { ! grep -qvE "^(Warning: .*)?$" "$1"; }
 cani_want() { # want(yes|no) id kubeconfig -- can-i args — 정확한 yes/no 와 rc 가 기대와 같아야 PASS
   local want=$1 id=$2 kc=$3; shift 4
   local rc=0 got=OTHER
