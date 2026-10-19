@@ -50,6 +50,8 @@ deny() { echo "Error from server (Forbidden): mock is forbidden: User \"system:s
 # ── 배포 SA 세션(steps.sh 의 _sa = --kubeconfig=.../sa.kubeconfig): Role 대로 허용, 나머지 403
 if [[ "${1:-}" == --kubeconfig=*sa.kubeconfig ]]; then
   shift; a="$*"
+  # 실측(#5 5회차 A-04): 없는 서비스로 route 를 만들 때 --port 가 없으면 oc 가 서버 요청 전에 클라이언트 오류로 끝난다
+  if [[ "$a" == "create route edge "* && "$a" != *"--port="* ]]; then echo "error: you need to provide a route port via --port when exposing a non-existent service" >&2; exit 1; fi
   case "$a" in
     "whoami") echo "system:serviceaccount:ci-cd:fds-deployer"; exit 0 ;;
     "auth can-i "*) echo no; exit 1 ;;
@@ -333,6 +335,10 @@ sed "s/^_scope_warning_only() .*/_scope_warning_only() { ! grep -qvE \"^(Warning
 cmp -s "$HERE/steps.sh" "$T/narrow.sh" && { echo "FAIL: 61c 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 FORBID='create token' REQUIRE_ERR='STOP: H-2 expect=no got=OTHER' run_case 61c_narrow_rule_stops_h2 narrow 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 62_other_stderr_still_stops template 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=other
+# #5 5회차 A-04: route 시험에 --port 가 없으면 클라이언트 오류로 권한 판정 전에 STOP. 대조(63b)는 수정 전 명령이 5회차처럼 A-04 에서 멈춘다
+sed 's/ --port=8080//' "$HERE/steps.sh" >"$T/noport.sh"
+cmp -s "$HERE/steps.sh" "$T/noport.sh" && { echo "FAIL: 63b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
+FORBID='^oc --kubeconfig=.* get nodes' REQUIRE_ERR='STOP: A-04 expect=ALLOW got=OTHER' run_case 63b_route_without_port_stops_a04 noport 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 unset FORBID REQUIRE_ERR
 unset FORBID REQUIRE_ERR
 

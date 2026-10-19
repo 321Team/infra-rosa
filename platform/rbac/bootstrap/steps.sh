@@ -212,11 +212,12 @@ run_steps() {
 
   # 허용(A)·거부(D) — 실제 SA token 요청. 쓰기는 --dry-run=server. DENY 는 이 SA 주체의 RBAC 거부 문장일 때만 인정.
   local S="$SA_IDENT"
+  # route 시험은 --port 를 준다: 없는 서비스(--service=none)에 포트가 없으면 oc 가 서버 요청 전에 "error: you need to provide a route port via --port …" 로 끝나 권한 판정을 못 한다(#5 5회차 A-04).
   expect A-01 ALLOW "$S" -- _sa create deployment a01-probe --image=registry.invalid/probe:0 -n fds-app --dry-run=server
   expect A-03 ALLOW "$S" -- _sa get pods -n fds-app
-  expect A-04 ALLOW "$S" -- _sa create route edge a04-probe --service=none -n fds-app --dry-run=server
+  expect A-04 ALLOW "$S" -- _sa create route edge a04-probe --service=none --port=8080 -n fds-app --dry-run=server
   if [[ -n "${ROUTE_HOST:-}" ]]; then
-    expect A-09 ALLOW "$S" -- _sa create route edge a09-probe --service=none --hostname="$ROUTE_HOST" -n fds-app --dry-run=server
+    expect A-09 ALLOW "$S" -- _sa create route edge a09-probe --service=none --port=8080 --hostname="$ROUTE_HOST" -n fds-app --dry-run=server
   else
     printf 'A-09\t%s\troute custom-host create\tALLOW\tNOT_RUN(승인 host PENDING)\t-\n' "$S" >>"$EV/results.tsv"
   fi
@@ -232,7 +233,7 @@ run_steps() {
   expect D-07c  DENY "$S" -- _sa get securitycontextconstraints restricted-v2
   expect D-12a  DENY "$S" -- _sa create serviceaccount d12-probe -n fds-app --dry-run=server
   expect D-12b  DENY "$S" -- _np_probe
-  expect D-13c  DENY "$S" -- _sa create route edge d13-probe --service=none --hostname=probe.invalid -n monitoring-api --dry-run=server
+  expect D-13c  DENY "$S" -- _sa create route edge d13-probe --service=none --port=8080 --hostname=probe.invalid -n monitoring-api --dry-run=server
   expect_cani MON-D-14 no "$S" -- _sa auth can-i create servicemonitors.monitoring.coreos.com -n fds-app
   rm -f -- "$WORKDIR/sa.kubeconfig"   # 정상 경로 정리. 실패로 중간에 끝나도 래퍼 cleanup 이 t·sa.kubeconfig 를 지운다(보완 1)
   # D-10(실제 만료 후 401)은 15분 대기가 필요해 bootstrap 창 밖, post-revoke-check.sh 이후 별도 기록.
