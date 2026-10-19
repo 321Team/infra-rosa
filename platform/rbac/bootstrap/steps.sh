@@ -151,6 +151,11 @@ run_steps() {
   expect_cani J-6 no jaehwan -- oc auth can-i create rolebindings.rbac.authorization.k8s.io -n fds-app --as=jaehwan "${G[@]}"
   expect_cani J-7 no jaehwan -- oc auth can-i list nodes --as=jaehwan "${G[@]}"
   expect_cani J-8 no jaehwan -- oc auth can-i get secrets -n fds-app --as=jaehwan "${G[@]}"
+  # 하영 clusterversion/version get 최소 권한(#5 6258874244). --as 그룹에 cluster-admins 를 넣지 않으므로
+  # 임시 cluster-admin 이 아니라 이 바인딩만으로 판정된다. 회수 뒤에는 post-revoke-check.sh 가 본인 세션으로 다시 확인.
+  expect_cani H-1 yes "$U" -- oc auth can-i get clusterversions.config.openshift.io/version --as="$U" "${G[@]}"
+  expect_cani H-2 no  "$U" -- oc auth can-i list clusterversions.config.openshift.io --as="$U" "${G[@]}"
+  expect_cani H-3 no  "$U" -- oc auth can-i update clusterversions.config.openshift.io/version --as="$U" "${G[@]}"
 
   # ⑩ 배포 SA 실제 token 시험(900초 요청, 원문 미출력)
   oc create token fds-deployer -n ci-cd --duration=900s >"$WORKDIR/t"

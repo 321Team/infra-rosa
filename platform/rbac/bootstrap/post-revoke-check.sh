@@ -65,12 +65,15 @@ run() { # id kubeconfig expect_set(예: DENY|UNAUTH) -- cmd...
   LAST=$got
 }
 cani() { # id kubeconfig -- can-i args (정확한 no 만 PASS)
-  local id=$1 kc=$2; shift 3
+  cani_want no "$@"
+}
+cani_want() { # want(yes|no) id kubeconfig -- can-i args — 정확한 yes/no 와 rc 가 기대와 같아야 PASS
+  local want=$1 id=$2 kc=$3; shift 4
   local rc=0 got=OTHER
   KUBECONFIG="$kc" oc auth can-i "$@" >"$EV/$id.out" 2>"$EV/$id.err" || rc=$?
   [[ $rc -eq 1 && "$(<"$EV/$id.out")" == no && ! -s "$EV/$id.err" ]] && got=no
   [[ $rc -eq 0 && "$(<"$EV/$id.out")" == yes ]] && got=yes
-  rec "$id" "can-i $*" no "$got" "$rc"
+  rec "$id" "can-i $*" "$want" "$got" "$rc"
 }
 
 [[ -f "$OLD" ]] || { log "STOP: 회수 전 세션 kubeconfig 없음($OLD) — D-11b 판정 불가"; exit 1; }
@@ -177,6 +180,10 @@ done
 cani D-11c-all  "$NEW" -- '*' '*' --all-namespaces
 cani D-11c-crb  "$NEW" -- create clusterrolebindings.rbac.authorization.k8s.io
 cani D-11c-node "$NEW" -- list nodes
+# 하영 clusterversion/version get 최소 권한(#5 6258874244) — 회수 뒤 본인 세션에서 get 만 yes, 나머지 no
+cani_want yes D-11a-cv-get  "$NEW" -- get clusterversions.config.openshift.io/version
+cani_want no  D-11a-cv-list "$NEW" -- list clusterversions.config.openshift.io
+cani_want no  D-11a-cv-upd  "$NEW" -- update clusterversions.config.openshift.io/version
 
 # D-11c ① — 관리면 grant 기록. 실측 빈 목록 1줄이면 부재, 그 밖에는 머리글·본문 형식이 맞을 때만 판정.
 rc=0; rosa list users -c "$CLUSTER_ID" >"$EV/D-11c-mgmt.out" 2>"$EV/D-11c-mgmt.err" || rc=$?

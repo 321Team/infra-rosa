@@ -81,6 +81,13 @@ if [[ "$1 $2" == "auth can-i" && "$*" == *"--as=jaehwan"* ]]; then
     *) echo no; exit 1 ;;
   esac
 fi
+# H-1~H-3: 하영 clusterversion/version get 최소 권한(--as=hayeoung, cluster-admins 그룹 없이). MOCK_CV_NOBIND = 바인딩 누락
+if [[ "$1 $2" == "auth can-i" && "$*" == *"--as=hayeoung"* ]]; then
+  case "$*" in
+    "auth can-i get clusterversions.config.openshift.io/version "*) [[ "${MOCK_CV_NOBIND:-0}" == 1 ]] && { echo no; exit 1; }; echo yes; exit 0 ;;
+    *) echo no; exit 1 ;;
+  esac
+fi
 if [[ "$1 $2" == "auth can-i" ]]; then
   rc="${MOCK_CANI_RC:-1}"
   case "$rc" in 0) echo yes ;; 1) echo no ;; esac
@@ -120,11 +127,15 @@ case "$*" in
     # 31: 로그인한 모든 사람에게 cluster-admin — 주체만 보면 '플랫폼 기본'처럼 보이는 위험 경로(보완 2)
     [[ "${MOCK_INV_AUTH_ADMIN:-0}" == 1 ]] && extra=',{"metadata":{"name":"authenticated-admin"},"roleRef":{"kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"Group","name":"system:authenticated"}]}'
     echo '{"items":[{"metadata":{"name":"cluster-admins"},"roleRef":{"kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"Group","name":"cluster-admins"}]},
-      {"metadata":{"name":"self-provisioners"},"roleRef":{"kind":"ClusterRole","name":"self-provisioner"},"subjects":[{"kind":"Group","name":"system:authenticated:oauth"}]}'"$extra"']}' ;;
+      {"metadata":{"name":"self-provisioners"},"roleRef":{"kind":"ClusterRole","name":"self-provisioner"},"subjects":[{"kind":"Group","name":"system:authenticated:oauth"}]},
+      {"metadata":{"name":"hayeoung-clusterversion-reader"},"roleRef":{"kind":"ClusterRole","name":"fds-clusterversion-reader"},"subjects":[{"kind":"User","name":"hayeoung"}]}'"$extra"']}' ;;
   "get rolebindings -n "*" -o json")
     echo '{"items":[{"metadata":{"name":"hayeoung-admin"},"roleRef":{"kind":"ClusterRole","name":"admin"},"subjects":[{"kind":"User","name":"hayeoung"}]}]}' ;;
   "get clusterrole self-provisioner -o json")   # 32x: 승인 목록 이름이지만 규칙이 바뀐 경우(R1)
     if [[ "${MOCK_SP_RULES:-0}" == 1 ]]; then echo '{"kind":"ClusterRole","rules":[{"apiGroups":[""],"resources":["secrets"],"verbs":["get"]}]}'; else echo '{"kind":"ClusterRole"}'; fi ;;
+  "get clusterrole fds-clusterversion-reader -o json")   # 53: 키트 ClusterRole 규칙이 넓어진 경우(list 추가)
+    v='"get"'; [[ "${MOCK_CV_RULES_WIDE:-0}" == 1 ]] && v='"get","list"'
+    echo '{"kind":"ClusterRole","rules":[{"apiGroups":["config.openshift.io"],"resources":["clusterversions"],"resourceNames":["version"],"verbs":['"$v"']}]}' ;;
   "get clusterrole "*" -o json") echo '{"kind":"ClusterRole"}' ;;
 esac
 exit 0
@@ -276,6 +287,9 @@ FORBID='^oc apply|create token' run_case 50_tmpl_clusterversion_no_uuid template
 FORBID='^oc apply|create token' run_case 51_tmpl_no_nodes template 1 MOCK_NODES_EMPTY=1
 # PR#43 리뷰 S3: 회수 판정 원본 복사 실패 → 완료로 보고하지 않음(rc1, receipt 없음). 회수 자체는 정상(revoke 1)
 REQUIRE_ERR='EVIDENCE_COPY_FAILED' run_case 52_revoke_evidence_copy_fail template 1 MOCK_TOKEN=1 MOCK_CP_FAIL=1
+# #5 6258874244: 하영 clusterversion/version get 최소 권한. 키트 ClusterRole 규칙이 넓어지면 회수 전 STOP, 바인딩이 빠지면 H-1 에서 STOP
+run_case 53_cv_reader_rules_widened_stops template 1 MOCK_TOKEN=1 MOCK_CV_RULES_WIDE=1
+FORBID='create token' run_case 54_cv_reader_binding_missing_stops template 1 MOCK_TOKEN=1 MOCK_CV_NOBIND=1
 unset FORBID
 
 # 증적 확인(보완 3·4, 리뷰 R3): 25 정상 회차 / 34 정책 대기 회차의 target·read-rc·분류·receipt
@@ -292,6 +306,7 @@ grep -qx 'CLUSTER_ID=mock-id' "$ev25/00-target.env" 2>/dev/null && grep -qx 'USE
 [[ $(grep -c ' rc=' "$ev25/04-read-rc.txt" 2>/dev/null) == 2 ]] || ok=FAIL
 grep -q $'^REVOKE_TARGET\tcluster\tcluster-admins' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
 grep -q $'^PLATFORM_DEFAULT\tcluster\tself-provisioners' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
+grep -q $'^APPROVED\tcluster\thayeoung-clusterversion-reader\tClusterRole\tfds-clusterversion-reader' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL   # #5 6258874244
 grep -qx 'STATUS=COMPLETE' "$ev25/99-receipt.env" 2>/dev/null && grep -qx 'FINAL_RC=0' "$ev25/99-receipt.env" || ok=FAIL
 # 인계표 1·3번 기록, grant 상태 rosa list users 원문 기록
 grep -qx 'OPENSHIFT_CLUSTER_UUID=00000000-0000-4000-8000-00000000mock' "$ev25/04-handoff-1-3.txt" 2>/dev/null || ok=FAIL

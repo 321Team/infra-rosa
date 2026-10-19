@@ -35,6 +35,8 @@ case "$a" in
   "auth can-i * * --all-namespaces")
     [[ "${MOCK_NEW_STAR:-no}" == yes ]] && { echo yes; exit 0; }; echo no; exit 1 ;;
   "auth can-i create servicemonitors"*"-n fds-app") echo yes; exit 0 ;;
+  # 하영 clusterversion/version get 최소 권한(#5 6258874244). MOCK_CV_NOBIND = 회수 뒤 세션에서 바인딩이 없음
+  "auth can-i get clusterversions.config.openshift.io/version") [[ "${MOCK_CV_NOBIND:-0}" == 1 ]] && { echo no; exit 1; }; echo yes; exit 0 ;;
   "auth can-i "*) echo no; exit 1 ;;
 esac
 exit 0
@@ -80,10 +82,12 @@ mk_fixture() { # home
       printf 'cluster\tcluster-admins\tClusterRole\tcluster-admin\tGroup:cluster-admins\n'
       printf 'cluster\tself-provisioners\tClusterRole\tself-provisioner\tGroup:system:authenticated:oauth\n'
       for ns in fds-app monitoring-api ci-cd; do printf '%s\thayeoung-admin\tClusterRole\tadmin\tUser:hayeoung\n' "$ns"; done
+      printf 'cluster\thayeoung-clusterversion-reader\tClusterRole\tfds-clusterversion-reader\tUser:hayeoung\n'   # #5 6258874244
       [[ "${FIX_HIDDEN:-0}" == 1 ]] && printf 'cluster\thidden-direct\tClusterRole\tsudoer\tUser:hayeoung\n'
     fi
   } >"$inv/access-paths-hayeoung.tsv"
   for r in cluster-admin self-provisioner admin sudoer; do echo '{"kind":"ClusterRole"}' >"$inv/clusterrole-$r.json"; done
+  echo '{"kind":"ClusterRole","rules":[{"apiGroups":["config.openshift.io"],"resources":["clusterversions"],"resourceNames":["version"],"verbs":["get"]}]}' >"$inv/clusterrole-fds-clusterversion-reader.json"
   ( cd "$inv" && sha256sum -- *.json *.txt *.tsv >SHA256SUMS )
   printf 'APPROVED\tfds-app\thayeoung-admin\n' >"$ev/10b-path-review.tsv"
   {
@@ -172,6 +176,8 @@ case_ P27_receipt_empty_hash        1 RC_EMPTY_OLD=1
 case_ P28_receipt_malformed_hash    1 RC_BAD_HASH=1
 case_ P29_ns_uid_file_swapped       1 TAMPER_UID=1 MOCK_UID_MISMATCH=1    # 수정 전: 원본·현재 UID 를 같이 바꾸면 PASS 했음
 case_ P30_receipt_without_uid_hash  1 RC_NO_UID=1
+# #5 6258874244: 회수 뒤 하영 세션에서 clusterversion/version get 이 안 되면 FAIL(바인딩 누락)
+case_ P34_cv_reader_missing_after_revoke 1 MOCK_CV_NOBIND=1
 # #5 A단계 실측 빈 목록(INFO 1줄): 이 클러스터 ID·stderr 없음일 때만 부재
 case_ P31_mgmt_empty_info_line      0 MOCK_USERS_MODE=noneinfo
 case_ P32_mgmt_empty_info_other_id  1 MOCK_USERS_MODE=noneinfo MOCK_EMPTY_ID=other-id

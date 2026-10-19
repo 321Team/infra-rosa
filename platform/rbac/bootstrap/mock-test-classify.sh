@@ -26,8 +26,10 @@ mk() { # dir — 정상 인벤토리
     printf 'cluster\tcluster-admins\tClusterRole\tcluster-admin\tGroup:cluster-admins\n'
     printf 'cluster\tself-provisioners\tClusterRole\tself-provisioner\tGroup:system:authenticated:oauth\n'
     for ns in fds-app monitoring-api ci-cd; do printf '%s\thayeoung-admin\tClusterRole\tadmin\tUser:hayeoung\n' "$ns"; done
+    printf 'cluster\thayeoung-clusterversion-reader\tClusterRole\tfds-clusterversion-reader\tUser:hayeoung\n'   # #5 6258874244
   } >"$d/access-paths-hayeoung.tsv"
   for r in cluster-admin self-provisioner admin; do echo '{"kind":"ClusterRole"}' >"$d/clusterrole-$r.json"; done
+  echo '{"kind":"ClusterRole","rules":[{"apiGroups":["config.openshift.io"],"resources":["clusterversions"],"resourceNames":["version"],"verbs":["get"]}]}' >"$d/clusterrole-fds-clusterversion-reader.json"
 }
 policy() { printf '# scope\tbinding\troleRef.kind\troleRef.name\tsubjects\trules_sha256\ncluster\tself-provisioners\tClusterRole\tself-provisioner\tGroup:system:authenticated:oauth\t%s\n' "$1"; }
 
@@ -63,6 +65,10 @@ t C8_rules_changed             1 "$C" "$T/i8" "$T/p1"
 # 형식은 맞지만 kind 가 ClusterRole 이 아닌 JSON
 mk "$T/i9"; echo '{"kind":"Role"}' >"$T/i9/clusterrole-self-provisioner.json"
 t C9_wrong_kind_json           1 "$C" "$T/i9" "$T/p1"
+# #5 6258874244: 키트 ClusterRole fds-clusterversion-reader — 정상은 APPROVED(C1), 규칙이 넓어지면(list 추가) STOP
+mk "$T/i10"; echo '{"kind":"ClusterRole","rules":[{"apiGroups":["config.openshift.io"],"resources":["clusterversions"],"resourceNames":["version"],"verbs":["get","list"]}]}' >"$T/i10/clusterrole-fds-clusterversion-reader.json"
+t C10_cv_reader_rules_widened   1 "$C" "$T/i10" "$T/p1"
+grep -q $'^APPROVED	cluster	hayeoung-clusterversion-reader' "$T/C1_normal.out" 2>/dev/null || { echo "FAIL: C1 에서 clusterversion-reader 가 APPROVED 가 아님"; fail=1; }
 # C7 은 PLATFORM_DEFAULT 로 분류되지 않아야 함
 grep -q '^PLATFORM_DEFAULT' "$T/C7_broken_json_stops.out" 2>/dev/null && { echo "FAIL: C7 이 PLATFORM_DEFAULT 로 분류됨"; fail=1; }
 exit "$fail"
