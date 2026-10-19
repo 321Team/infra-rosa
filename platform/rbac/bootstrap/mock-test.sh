@@ -85,6 +85,7 @@ if [[ "${1:-} ${2:-}" == "auth can-i" && " $* " != *" -n "* && "$*" != *--all-na
            if [[ "$r" == *.* ]]; then printf "Warning: resource '%s' is not namespace scoped in group '%s'\n\n" "${r%%.*}" "${r#*.}" >&2
            else printf "Warning: resource '%s' is not namespace scoped\n\n" "$r" >&2; fi ;;
     other) echo "error: unexpected server response" >&2 ;;
+    unknown) echo "Warning: the server doesn't have a resource type 'nodez'" >&2 ;;   # PR#46 R1: 다른 Warning 은 OTHER
   esac
 fi
 # ⑨ `oc auth can-i --list` 는 실제로 권한 표를 출력하고 rc0 (SSAR yes/no 질의와 다름)
@@ -338,8 +339,8 @@ run_case 61_scope_warning_accepted template 0 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 sed 's/ \&\& _scope_warning_only "\$err" \&\& got=no$/ \&\& [[ ! -s "$err" ]] \&\& got=no/' "$HERE/steps.sh" >"$T/noscope.sh"
 cmp -s "$HERE/steps.sh" "$T/noscope.sh" && { echo "FAIL: 61b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 61b_without_fix_stops_j7 noscope 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
-# 대조(61c): PR#45 의 좁은 규칙(" is not namespace scoped" 로 끝나는 경고만)은 그룹 접미사 경고로 4회차처럼 H-2 에서 멈춘다
-sed "s/^_scope_warning_only() .*/_scope_warning_only() { ! grep -qvE \"^(Warning: resource '[a-z0-9.-]+' is not namespace scoped)?\$\" \"\$1\"; }/" "$HERE/steps.sh" >"$T/narrow.sh"
+# 대조(61c): 그룹 접미사를 허용하지 않는 규칙(PR#45 형태)은 그룹 접미사 경고로 4회차처럼 H-2 에서 멈춘다
+sed "s/( in group '\[a-z0-9.-\]+')?//" "$HERE/steps.sh" >"$T/narrow.sh"
 cmp -s "$HERE/steps.sh" "$T/narrow.sh" && { echo "FAIL: 61c 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 FORBID='create token' REQUIRE_ERR='STOP: H-2 expect=no got=OTHER' run_case 61c_narrow_rule_stops_h2 narrow 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
 FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 62_other_stderr_still_stops template 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=other
@@ -352,6 +353,8 @@ FORBID='^oc --kubeconfig=.* get nodes' REQUIRE_ERR='STOP: A-04 expect=ALLOW got=
 sed 's/elif grep -qF "is forbidden: User /elif grep -q "(Forbidden)" "$errf" \&\& grep -qF "User /' "$HERE/steps.sh" >"$T/needfb.sh"
 cmp -s "$HERE/steps.sh" "$T/needfb.sh" && { echo "FAIL: 64b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 FORBID='^oc --kubeconfig=.* get pods -n openshift-monitoring' REQUIRE_ERR='STOP: D-01 expect=DENY got=OTHER' run_case 64b_need_forbidden_stops_d01 needfb 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=1
+# PR#46 R1: scope 경고가 아닌 Warning(예: 알 수 없는 리소스)은 정상 거부로 보지 않는다 → J-7 에서 STOP
+FORBID='create token' REQUIRE_ERR='STOP: J-7 expect=no got=OTHER' run_case 65_other_warning_stops template 1 MOCK_TOKEN=1 MOCK_SCOPE_WARN=unknown
 unset FORBID REQUIRE_ERR
 unset FORBID REQUIRE_ERR
 

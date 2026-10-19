@@ -68,8 +68,14 @@ run() { # id kubeconfig expect_set(예: DENY|UNAUTH) -- cmd...
 cani() { # id kubeconfig -- can-i args (정확한 no 만 PASS)
   cani_want no "$@"
 }
-# stderr 가 비었거나 `Warning:` 줄(과 빈 줄)뿐이면 참 — steps.sh 와 같은 규칙(#5 3회차 J-7, 4회차 H-2)
-_scope_warning_only() { ! grep -qvE "^(Warning: .*)?$" "$1"; }
+# stderr 가 비었거나 scope 경고(+선택적 그룹 접미사)와 빈 줄뿐이면 참 — steps.sh 와 같은 규칙(#5 3회차 J-7, 4회차 H-2, PR#46 R1)
+_scope_warning_only() {
+  # PR#46 리뷰 5571119164 R1·C1(이권욱 제안): 정확한 scope 경고(+선택적 그룹 접미사)와 빈 줄만 허용한다.
+  # 다른 Warning(예: 알 수 없는 리소스)은 OTHER. grep 읽기 오류(rc2)를 '경고뿐'으로 뒤집지 않도록 rc1 만 참.
+  local rc=0
+  grep -vE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped( in group '[a-z0-9.-]+')?)?$" "$1" >/dev/null || rc=$?
+  [[ $rc -eq 1 ]]
+}
 cani_want() { # want(yes|no) id kubeconfig -- can-i args — 정확한 yes/no 와 rc 가 기대와 같아야 PASS
   local want=$1 id=$2 kc=$3; shift 4
   local rc=0 got=OTHER

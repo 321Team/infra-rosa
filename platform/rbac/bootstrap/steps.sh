@@ -38,11 +38,17 @@ expect() {
   [[ "$got" == "$want" ]] || { log "STOP: $id expect=$want got=$got rc=$rc"; return 1; }
 }
 
-# stderr 가 비었거나 `Warning:` 으로 시작하는 줄(과 빈 줄)뿐이면 참. `error:`·`Error from server` 등 그 밖의 stderr 는 판정 불가.
+# stderr 가 비었거나 아래 scope 경고(+선택적 그룹 접미사)와 빈 줄뿐이면 참. 그 밖의 Warning·error 는 판정 불가.
 #   #5 3회차 J-7(6264116497)·4회차 H-2: 세션 기본 project 때문에 cluster 범위 자원 질의에 아래와 같은 경고가 붙는다(그룹 접미사 포함).
 #   Warning: resource 'nodes' is not namespace scoped
 #   Warning: resource 'clusterversions' is not namespace scoped in group 'config.openshift.io'
-_scope_warning_only() { ! grep -qvE "^(Warning: .*)?$" "$1"; }
+_scope_warning_only() {
+  # PR#46 리뷰 5571119164 R1·C1(이권욱 제안): 정확한 scope 경고(+선택적 그룹 접미사)와 빈 줄만 허용한다.
+  # 다른 Warning(예: 알 수 없는 리소스)은 OTHER. grep 읽기 오류(rc2)를 '경고뿐'으로 뒤집지 않도록 rc1 만 참.
+  local rc=0
+  grep -vE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped( in group '[a-z0-9.-]+')?)?$" "$1" >/dev/null || rc=$?
+  [[ $rc -eq 1 ]]
+}
 
 # expect_cani <id> <yes|no> <subject> -- <oc auth can-i args...>  (SSAR/SAR: 정확한 yes/no 만 인정)
 expect_cani() {
