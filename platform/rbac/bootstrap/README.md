@@ -69,7 +69,19 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
      - `KUBECONFIG` 환경변수로 Phase 1 파일을 지정해 쓰고 있었다면, 그 지정도 실행 뒤 그대로 남아 있어야 합니다. 그래서 Bash는 **서브셸 `( … )`** 안에서 실행하고, PowerShell은 **`finally`에서 원래 값을 먼저 복원**합니다.
      - kubeconfig는 고정 경로가 아니라 `mktemp -d`(PowerShell은 임시 폴더 + GUID)로 이번 회차 전용 파일을 만들고, 끝나면 그 파일과 폴더만 지웁니다.
    - `fds-app`·`monitoring-api`는 Phase 1에도 있는 namespace 이름입니다. 로그인 뒤 **`oc whoami` = 본인 ID, `oc whoami --show-server` = 승인 API**를 둘 다 확인하고, 하나라도 다르면 권한 확인을 하지 않고 중단합니다. 두 값은 결과에 포함합니다.
-   - `can-i` 4개는 기대값(yes/no)과 rc를 함께 확인하고 출력합니다. 하나라도 다르면 FAIL입니다.
+   - `can-i` 6개는 기대값(yes/no)과 rc를 함께 확인하고 출력합니다. 하나라도 다르면 FAIL입니다.
+
+     | 확인 | `jaehwan` | `gwonuk` |
+     |---|---|---|
+     | `fds-app` Pod 조회 | yes | yes |
+     | `fds-app` Deployment 생성 | no | no |
+     | 노드 목록 조회 | no | no |
+     | `fds-app` Secret 조회 | no | no |
+     | `fds-app` ServiceMonitor 생성 (J-1과 같은 질문) | **yes** | no |
+     | `fds-app` PrometheusRule 생성 (J-2와 같은 질문) | **yes** | no |
+
+     - 아래 두 줄은 `monitoring-edit`이 **재환 계정에만** 붙었는지 본인 로그인으로 확인하는 항목입니다.
+     - 첫 설정 중 J-1·J-2는 관리자가 `--as`로 대신 물어본 결과입니다.
    - 실행 전에 `<승인 API_URL>`(실행 카드 값)과 `<본인 id>`(`gwonuk` 또는 `jaehwan`)를 바꿉니다.
    - 증적 표기: "계정 소유자가 실행, 비밀번호는 IdP 관리자도 앎"(GO §2).
 
@@ -99,6 +111,10 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
      check_can_i no create deployments -n fds-app  || exit 1
      check_can_i no list nodes                    || exit 1
      check_can_i no get secrets -n fds-app         || exit 1
+     # monitoring-edit 은 jaehwan 에게만 fds-app 에서 부여(baseline#25). 본인 로그인으로 J-1·J-2 와 같은 질문을 확인
+     if [ "$EXPECTED_USER" = jaehwan ]; then mon=yes; else mon=no; fi
+     check_can_i "$mon" create servicemonitors.monitoring.coreos.com -n fds-app  || exit 1
+     check_can_i "$mon" create prometheusrules.monitoring.coreos.com -n fds-app  || exit 1
    )
    echo "D-11d rc=$?"
    ```
@@ -124,8 +140,12 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
      if ($LASTEXITCODE -ne 0) { throw "STOP: server 조회 실패" }
      "USER=$actualUser"; "SERVER=$actualServer"
      if ($actualUser -ne $EXPECTED_USER -or $actualServer -ne $API_URL) { throw "STOP: 사용자 또는 server 불일치" }
+     # monitoring-edit 은 jaehwan 에게만 fds-app 에서 부여(baseline#25). 본인 로그인으로 J-1·J-2 와 같은 질문을 확인
+     $mon = if ($EXPECTED_USER -eq 'jaehwan') { 'yes' } else { 'no' }
      foreach ($c in @(@('yes','get','pods','-n','fds-app'), @('no','create','deployments','-n','fds-app'),
-                      @('no','list','nodes'), @('no','get','secrets','-n','fds-app'))) {
+                      @('no','list','nodes'), @('no','get','secrets','-n','fds-app'),
+                      @($mon,'create','servicemonitors.monitoring.coreos.com','-n','fds-app'),
+                      @($mon,'create','prometheusrules.monitoring.coreos.com','-n','fds-app'))) {
        $want = $c[0]; $args2 = $c[1..($c.Count - 1)]
        $got = oc auth can-i @args2; $rc = $LASTEXITCODE
        "can-i $($args2 -join ' ') => $got (rc=$rc)"
