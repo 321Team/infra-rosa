@@ -12,20 +12,28 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 |---|---|
 | `../manifests/namespaces.yaml` | ⑤ Namespace 3개(`fds-app`, `monitoring-api`, `ci-cd`) + label/annotation |
 | `../manifests/rbac.yaml` | ⑦ `ci-cd/fds-deployer` SA, 앱 SA 2개, `fds-app` Role(+`routes/custom-host` create)/RoleBinding |
-| `../manifests/human-bindings.yaml` | ⑧ 하영 `admin`, 권욱 `view`, 재환 `view` + `fds-app` `monitoring-edit` |
+| `../manifests/human-bindings.yaml` | ⑧ 하영 `admin`, 권욱 `view`, 재환 `view` + `fds-app` `monitoring-edit`, 하영 `clusterversion/version` get 1개(#6·#4 수집기의 클러스터 UUID 확인용, cluster 범위 최소 권한) |
 | `bootstrap-session.sh` | 래퍼. 대상 결속(Cluster ID↔API) → grant → `steps.sh` → **성공·실패·INT·TERM·마감 모두** revoke → 회수 확인 → 최종 rc |
 | `steps.sh` | ③~⑩-b 단계. 로그인·결속 → 상태 기록 → manifest 적용 → `--as` 판정·J-1~8 → **배포 SA 실제 token 허용/거부 시험** → 권한 목록 저장·경로 검토 |
 | `collect-access-inventory.sh` | ⑩-b 권한 목록 저장(읽기 전용) |
 | `classify-access-paths.sh` | ⑩-b 경로 분류(오프라인 공용 규칙). bootstrap 과 회수 뒤 재판정에서 같은 규칙. 승인 policy 대조, rc 0/3/1 |
 | `post-revoke-check.sh` | ⑫ 회수 뒤 D-11 판정(회수 전 세션 → 새 로그인 → 관리면·SSAR·경로 검토 → 회수 전 세션 정리) |
-| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
+| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` / `mock-test-d11d.sh` / `mock-test-d11d.ps1` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
 
 ## 생성 당일 순서 (요약)
 
-1. **① IdP**: htpasswd IdP `fds-htpasswd`에 `hayeoung`·`gwonuk`·`jaehwan` 3명을 등록합니다(해시는 개인 전달, 파일은 생성 직후 삭제). 이 단계는 래퍼 밖에서 합니다.
+1. **① IdP**: htpasswd IdP `fds-htpasswd`에 `hayeoung`·`gwonuk`·`jaehwan` 3명을 등록합니다. 이 단계는 래퍼 밖에서 하는 **유일한 쓰기**라 래퍼의 결속 검사를 거치지 않습니다. 그래서 클러스터 이름이 아니라 **Cluster ID**로 지정합니다(PR#43 리뷰 S2).
+   - **비밀번호 방식(#5 GO [6251906186](https://github.com/321Team/infra-rosa/issues/5#issuecomment-6251906186) §2와 같음)**
+     - IdP 관리자 하영이 3명의 비밀번호(무작위 20자 이상)를 만들고 bcrypt 해시 파일을 일괄 생성합니다.
+     - 비밀번호는 각 계정 소유자에게만 개인적으로 전달합니다. GitHub·이슈·공유폴더·증적에는 넣지 않습니다.
+     - 시작 기록에는 **전달 경로의 종류만**(대면, 개인 메신저 등) 적습니다.
+     - 파일은 `~/rosa-idp`(700)에만 두고 IdP 생성 직후 삭제합니다.
+     - 계정 소유자 동의(GO P8)가 있어야 시작합니다. 관리자가 현재 비밀번호를 안다는 위험은 각 계정 소유자가 받아들인 것으로 기록합니다.
    ```bash
-   rosa list idps -c fds-rosa-hcp
-   rosa create idp -c fds-rosa-hcp --type htpasswd --name fds-htpasswd --from-file ~/rosa-idp/htpasswd
+   CLUSTER_ID=<id>                                   # 실행 카드의 Cluster ID
+   rosa list idps -c "$CLUSTER_ID"                   # htpasswd 가 이미 있으면 STOP
+   rosa create idp -c "$CLUSTER_ID" --type htpasswd --name fds-htpasswd --from-file ~/rosa-idp/htpasswd
+   rm -f ~/rosa-idp/htpasswd                         # 생성 직후 삭제
    ```
 2. **②~⑪ 래퍼 한 번 실행** — 아래 "실행 카드"를 먼저 채우고, 두 번째 관리 세션(회수용)을 미리 열어 둡니다.
    `API_URL`은 손으로 적지 않고 **`rosa describe`가 돌려주는 표기 그대로** 씁니다. 래퍼는 이 값과 정확히 일치하는지 비교하며(포트 `:443`·끝 `/` 차이도 불일치 → STOP), 표기를 정규화하지 않습니다.
@@ -56,14 +64,115 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
    CLUSTER_ID=<id> API_URL=<api url> ./post-revoke-check.sh ~/rosa-idp/evidence-<시각>; echo "rc=$?"
    ```
 4. **D-11d** — 권욱·재환이 **각자 본인 로그인**으로 확인해 #5에 결과를 붙입니다.
+   - **이번 회차 전용 임시 kubeconfig로 실행하고, 끝나면 실행 전 `KUBECONFIG` 상태로 되돌립니다(PR#43 리뷰 S1·B1, GO P9).**
+     - 기본 kubeconfig에 로그인하면 Phase 1 공용 OCP context가 있는 파일에 ROSA context가 추가되고 current-context가 바뀝니다.
+     - `KUBECONFIG` 환경변수로 Phase 1 파일을 지정해 쓰고 있었다면, 그 지정도 실행 뒤 그대로 남아 있어야 합니다. 그래서 Bash는 **서브셸 `( … )`** 안에서 실행하고, PowerShell은 **`finally`에서 원래 값을 먼저 복원**합니다.
+     - kubeconfig는 고정 경로가 아니라 `mktemp -d`(PowerShell은 임시 폴더 + GUID)로 이번 회차 전용 파일을 만들고, 끝나면 그 파일과 폴더만 지웁니다.
+   - `fds-app`·`monitoring-api`는 Phase 1에도 있는 namespace 이름입니다. 로그인 뒤 **`oc whoami` = 본인 ID, `oc whoami --show-server` = 승인 API**를 둘 다 확인하고, 하나라도 다르면 권한 확인을 하지 않고 중단합니다. 두 값은 결과에 포함합니다.
+   - `can-i` 6개는 기대값(yes/no)과 rc를 함께 확인하고 출력합니다. 하나라도 다르면 FAIL입니다.
+
+     | 확인 | `jaehwan` | `gwonuk` |
+     |---|---|---|
+     | `fds-app` Pod 조회 | yes | yes |
+     | `fds-app` Deployment 생성 | no | no |
+     | 노드 목록 조회 | no | no |
+     | `fds-app` Secret 조회 | no | no |
+     | `fds-app` ServiceMonitor 생성 (J-1과 같은 질문) | **yes** | no |
+     | `fds-app` PrometheusRule 생성 (J-2와 같은 질문) | **yes** | no |
+
+     - 아래 두 줄은 `monitoring-edit`이 **재환 계정에만** 붙었는지 본인 로그인으로 확인하는 항목입니다.
+     - 첫 설정 중 J-1·J-2는 관리자가 `--as`로 대신 물어본 결과입니다.
+   - 실행 전에 `<승인 API_URL>`(실행 카드 값)과 `<본인 id>`(`gwonuk` 또는 `jaehwan`)를 바꿉니다.
+   - 증적 표기: "계정 소유자가 실행, 비밀번호는 IdP 관리자도 앎"(GO §2).
+
+   bash(CloudShell·Linux·Git Bash) — 마지막 줄의 `D-11d rc=0`이 PASS입니다:
+<!-- d11d-bash:start -->
    ```bash
-   oc login <api url> -u <본인 id>
-   oc auth can-i get pods -n fds-app            # yes
-   oc auth can-i create deployments -n fds-app  # no
-   oc auth can-i list nodes                     # no
-   oc auth can-i get secrets -n fds-app         # no
+   (
+     umask 077
+     d11_dir=$(mktemp -d) || exit 1
+     export KUBECONFIG="$d11_dir/kubeconfig"
+     trap 'oc logout >/dev/null 2>&1 || true; rm -f -- "$KUBECONFIG"; rmdir -- "$d11_dir"' EXIT
+     API_URL="<승인 API_URL>"
+     EXPECTED_USER="<본인 id>"
+     oc login "$API_URL" -u "$EXPECTED_USER" || exit 1
+     actual_user=$(oc whoami) || exit 1
+     actual_server=$(oc whoami --show-server) || exit 1
+     printf 'USER=%s\nSERVER=%s\n' "$actual_user" "$actual_server"
+     [ "$actual_user" = "$EXPECTED_USER" ] && [ "$actual_server" = "$API_URL" ] || exit 1
+     check_can_i() {
+       local want=$1 got rc=0; shift
+       got=$(oc auth can-i "$@") || rc=$?
+       printf 'can-i %s => %s (rc=%s)\n' "$*" "$got" "$rc"
+       [[ "$want" == yes && $rc == 0 && "$got" == yes ]] ||
+         [[ "$want" == no && $rc == 1 && "$got" == no ]]
+     }
+     check_can_i yes get pods -n fds-app           || exit 1
+     check_can_i no create deployments -n fds-app  || exit 1
+     check_can_i no list nodes                    || exit 1
+     check_can_i no get secrets -n fds-app         || exit 1
+     # monitoring-edit 은 jaehwan 에게만 fds-app 에서 부여(baseline#25). 본인 로그인으로 J-1·J-2 와 같은 질문을 확인
+     if [ "$EXPECTED_USER" = jaehwan ]; then mon=yes; else mon=no; fi
+     check_can_i "$mon" create servicemonitors.monitoring.coreos.com -n fds-app  || exit 1
+     check_can_i "$mon" create prometheusrules.monitoring.coreos.com -n fds-app  || exit 1
+   )
+   echo "D-11d rc=$?"
    ```
+<!-- d11d-bash:end -->
+   PowerShell(Windows) — 마지막 줄의 `D-11d RESULT: PASS`가 PASS입니다:
+<!-- d11d-ps:start -->
+   ```powershell
+   $d11HadConfig = Test-Path Env:KUBECONFIG
+   $d11PreviousConfig = $env:KUBECONFIG
+   $d11Directory = Join-Path ([IO.Path]::GetTempPath()) ("rosa-d11d-" + [guid]::NewGuid().ToString("N"))
+   New-Item -ItemType Directory -Path $d11Directory -ErrorAction Stop | Out-Null
+   $d11Config = Join-Path $d11Directory "kubeconfig"
+   $d11Ok = $false
+   try {
+     $env:KUBECONFIG = $d11Config
+     $API_URL = "<승인 API_URL>"
+     $EXPECTED_USER = "<본인 id>"
+     oc login $API_URL -u $EXPECTED_USER
+     if ($LASTEXITCODE -ne 0) { throw "STOP: 로그인 실패" }
+     $actualUser = oc whoami
+     if ($LASTEXITCODE -ne 0) { throw "STOP: whoami 실패" }
+     $actualServer = oc whoami --show-server
+     if ($LASTEXITCODE -ne 0) { throw "STOP: server 조회 실패" }
+     "USER=$actualUser"; "SERVER=$actualServer"
+     if ($actualUser -ne $EXPECTED_USER -or $actualServer -ne $API_URL) { throw "STOP: 사용자 또는 server 불일치" }
+     # monitoring-edit 은 jaehwan 에게만 fds-app 에서 부여(baseline#25). 본인 로그인으로 J-1·J-2 와 같은 질문을 확인
+     $mon = if ($EXPECTED_USER -eq 'jaehwan') { 'yes' } else { 'no' }
+     foreach ($c in @(@('yes','get','pods','-n','fds-app'), @('no','create','deployments','-n','fds-app'),
+                      @('no','list','nodes'), @('no','get','secrets','-n','fds-app'),
+                      @($mon,'create','servicemonitors.monitoring.coreos.com','-n','fds-app'),
+                      @($mon,'create','prometheusrules.monitoring.coreos.com','-n','fds-app'))) {
+       $want = $c[0]; $args2 = $c[1..($c.Count - 1)]
+       $got = oc auth can-i @args2; $rc = $LASTEXITCODE
+       "can-i $($args2 -join ' ') => $got (rc=$rc)"
+       if (-not (($want -eq 'yes' -and $rc -eq 0 -and $got -eq 'yes') -or ($want -eq 'no' -and $rc -eq 1 -and $got -eq 'no'))) {
+         throw "STOP: can-i 기대값 불일치($($args2 -join ' '))"
+       }
+     }
+     $d11Ok = $true
+   } finally {
+     if ($d11HadConfig) { $env:KUBECONFIG = $d11PreviousConfig } else { Remove-Item Env:KUBECONFIG -ErrorAction SilentlyContinue }
+     if (Test-Path -LiteralPath $d11Config) { oc --kubeconfig $d11Config logout | Out-Null; Remove-Item -LiteralPath $d11Config }
+     Remove-Item -LiteralPath $d11Directory -ErrorAction SilentlyContinue
+     if ($d11Ok) { "D-11d RESULT: PASS" } else { "D-11d RESULT: FAIL" }
+   }
+   ```
+<!-- d11d-ps:end -->
 5. 증적을 `fds-project-evidence` `evidence/P2-ROSA-01/`로 PR 편입(독립 리뷰)하고, #4 Handoff 4·5에 제공합니다.
+   - **반출 대상(PR#43 리뷰 S3)**: 아래 전부를 묶고, 묶음 안에 `SHA256SUMS`를 넣은 뒤 공유 사본을 재해시합니다.
+     - `~/rosa-idp/bootstrap.log` — 래퍼 로그
+     - `~/rosa-idp/evidence-<시각>/` 전체 — 특히 `11-revoke-verify/`가 들어 있어야 합니다. 래퍼가 cleanup에서 복사합니다:
+       - `verify-users.N.{out,err}`: 관리면 회수 판정 원문. `REVOKE_VERIFIED`의 직접 근거
+       - `verify-cani.N.{out,err}`: 회수 전 세션 SSAR 원문
+       - `preflight-cluster.json`: grant 전 Cluster ID↔API 결속, `external_id` 근거
+       - `SHA256SUMS`
+     - `~/rosa-idp/d11-<시각>/` — ⑫ 결과
+   - `11-revoke-verify/`가 없거나 `sha256sum -c`가 실패하면 증적이 불완전한 것입니다. 래퍼도 복사에 실패하면 `EVIDENCE_COPY_FAILED`로 rc=1이 되고 receipt를 발행하지 않습니다.
+   - `rosa whoami` 출력에 들어 있는 계정 이메일·이름 줄은 evidence 저장소로 옮기기 전에 가립니다.
 
 ## 실행 카드 — 작업창 확정 때 채워서 #5에 먼저 올림 (PR#37 이권욱 리뷰)
 
@@ -86,10 +195,13 @@ rosa list users -c <id>
 
 | 항목 | 위치 | 확인 방법 / 다르면 |
 |---|---|---|
-| `rosa list users` 머리글 | `ROSA_USERS_HEADER_RE` (래퍼·post) | 생성 후 `rosa list users -c <id>` 실제 출력. 다르면 정규식을 고치고 다시 리뷰받기 전에는 실행하지 않음(그 전에는 UNKNOWN → rc1) |
-| `rosa describe` 의 `api.url` 실제 표기 | 래퍼 F1 결속·`steps.sh` ③ server 비교 | 생성 후 표기(포트·끝 `/`)를 #5에 기록하고 `API_URL`을 그 값 그대로 사용. `oc whoami --show-server` 표기와 다르면 ③에서 STOP → 기록 후 재검토 |
-| `rosa revoke user ... -y` 옵션 | 래퍼 cleanup | `rosa revoke user --help` |
-| htpasswd IdP 개수 제한·`--from-file` | ① | 기존 htpasswd IdP가 있으면 STOP |
+| `rosa list users` 빈 목록 | `ROSA_USERS_EMPTY_LINE` (래퍼·post) | **A단계 실측(2026-10-18)**: 머리글 없이 stdout 1줄 `INFO: There are no users configured for cluster '<id>'`, rc0, stderr 없음. 정확히 이 1줄(이 회차 ID)일 때만 부재. 다른 ID·추가 줄·stderr·rc≠0 은 UNKNOWN |
+| `rosa list users` 머리글(사용자 있을 때) | `ROSA_USERS_HEADER_RE` (래퍼·post) | grant 전에는 볼 수 없음. ③에서 grant 상태 원문을 `03-granted-users.out`에 기록만 함 → 첫 회차 증적으로 정규식 확정·리뷰. 회수 뒤 판정은 빈 목록 규칙을 쓰므로 머리글이 달라도 회수 확인은 막히지 않음(수렴 대기 중 PRESENT 를 못 읽으면 UNKNOWN → 재조회) |
+| `rosa describe` 의 `api.url` 실제 표기 | 래퍼 F1 결속·`steps.sh` ③ server 비교 | **A단계 실측**: `https://api.fds-rosa-hcp.khht.p3.openshiftapps.com:443`. `API_URL`은 이 값 그대로. `oc whoami --show-server` 표기와 다르면 ③에서 STOP → 기록 후 재검토 |
+| `rosa revoke user ... -y` 옵션 | 래퍼 cleanup | **A단계 실측**: `-y, --yes` 있음. `rosa grant user cluster-admin` 형식도 help 예시와 일치 |
+| htpasswd IdP 개수 제한·`--from-file` | ① | **A단계 실측**: 기존 IdP 0개, `--from-file` 있음. 실행 직전 `rosa list idps`를 다시 보고 htpasswd 가 있으면 STOP |
+| OpenShift cluster UUID·노드 Ready (#4 Handoff 1·3번) | `steps.sh` ④ `04-handoff-1-3.txt` | 회수 뒤 namespace admin 으로는 `clusterversion`·`nodes` 를 읽을 수 없어 cluster-admin 이 있는 ④에서 읽음. 읽기 실패·값 없음이면 STOP(→ 회수). UUID 는 `rosa describe` `external_id`(A단계 `37eecf03-…`)와 교차 확인 |
+| CloudShell `oc` | 실행 전 준비 | **A단계 실측**: 설치 안 됨. 실행 전에 설치하고 `oc version --client` 기록 |
 | grant/revoke 반영 지연 | 래퍼 `VERIFY_TRIES`·`VERIFY_INTERVAL` | 기본 60초 × 10회. 넘으면 CLEANUP_REQUIRED |
 | `cluster-admins` 그룹·binding 실제 이름, `dedicated-admins` 유무 | `steps.sh` ④·⑩-b 분류 | 다르면 ⑩-b가 UNEXPECTED로 STOP → 정의 갱신·리뷰 |
 | self-provisioner 등 플랫폼 기본 binding | ④·⑩-b | `system:authenticated(:oauth)` 대상은 PLATFORM_DEFAULT로 기록만, 수정하지 않음 |
@@ -112,6 +224,8 @@ bash platform/rbac/bootstrap/mock-test-inventory.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-post.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-classify.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-receipt.sh; echo "rc=$?"   # jq 불필요
+bash platform/rbac/bootstrap/mock-test-d11d.sh; echo "rc=$?"      # README D-11d Bash 예시 그대로 실행, jq 불필요
+# Windows: powershell -NoProfile -ExecutionPolicy Bypass -File platform/rbac/bootstrap/mock-test-d11d.ps1   # README D-11d PowerShell 예시
 ```
 
 ## 경계

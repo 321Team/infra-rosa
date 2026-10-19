@@ -29,6 +29,13 @@ ROSA_USERS_HEADER_RE="${ROSA_USERS_HEADER_RE:-^ID[[:space:]]+GROUPS[[:space:]]*$
 # 본문 각 행의 형식(PR#40 리뷰 R5). 머리글이 맞아도 본문 한 행이라도 이 형식이 아니면 UNKNOWN(부재로 승격하지 않음).
 # [AFTER-CREATE] 실제 `rosa list users` 행 형식·그룹 이름으로 확정.
 ROSA_USERS_ROW_RE="${ROSA_USERS_ROW_RE:-^[a-z0-9][a-z0-9._@-]*[[:space:]]+(cluster-admins|dedicated-admins)(,(cluster-admins|dedicated-admins))*[[:space:]]*$}"
+# 빈 목록 출력(#5 A단계 실측, fds-rosa-hcp, 2026-10-18): 머리글 없이 stdout 에 아래 1줄만 나오고 rc0.
+#   INFO: There are no users configured for cluster '<CLUSTER_ID>'
+# rc0 + stderr 비어 있음 + stdout 정확히 이 1줄(이 회차 CLUSTER_ID)일 때만 부재로 본다. 다른 ID·추가 줄·stderr 는 UNKNOWN.
+ROSA_USERS_EMPTY_LINE="INFO: There are no users configured for cluster '$CLUSTER_ID'"
+users_list_empty() { # out err
+  [[ ! -s "$2" && "$(wc -l <"$1")" -eq 1 && "$(<"$1")" == "$ROSA_USERS_EMPTY_LINE" ]]
+}
 
 umask 077
 mkdir -p "$WORKDIR"
@@ -43,12 +50,15 @@ watchdog_pid=""
 log() { printf '[%s] %s\n' "$(date '+%F %T %Z')" "$*" >&2; }
 
 # 관리면 grant 확인 → 표준출력: ABSENT | PRESENT | UNKNOWN
-#   ABSENT 는 rc0 + 머리글 형식 일치 + 대상 사용자 행에 cluster-admin 이 없을 때만.
+#   ABSENT 는 rc0 + (실측 빈 목록 1줄 | 머리글 형식 일치 + 대상 사용자 행에 cluster-admin 없음)일 때만.
 check_mgmt_grant() {
   local out="$WORKDIR/verify-users.$1.out" err="$WORKDIR/verify-users.$1.err" rc=0
   rosa list users -c "$CLUSTER_ID" >"$out" 2>"$err" || rc=$?
   if [[ $rc -ne 0 ]]; then
     log "MGMT_QUERY_FAILED rc=$rc"; echo UNKNOWN; return
+  fi
+  if users_list_empty "$out" "$err"; then
+    echo ABSENT; return
   fi
   if ! head -n 1 "$out" | grep -Eq "$ROSA_USERS_HEADER_RE"; then
     log "MGMT_FORMAT_UNKNOWN (머리글 불일치)"; echo UNKNOWN; return
@@ -128,6 +138,14 @@ cleanup() {
     log "CLEANUP_REQUIRED: token 임시 파일이 남아 있음"
     rc=1
   fi
+  # 회수 판정·대상 결속 원본을 증적 폴더로 복사(PR#43 리뷰 S3). 성공·실패 회차 모두 — 실패 조사에도 필요하다.
+  #   verify-users.N.{out,err}  관리면 ABSENT 판정 원문(REVOKE_VERIFIED 의 직접 근거)
+  #   verify-cani.N.{out,err}   회수 전 세션 SSAR 원문
+  #   preflight-cluster.json    grant 전 Cluster ID↔API 결속·external_id 근거
+  # 복사가 실패하면 증적이 불완전하므로 완료로 보고하지 않는다(rc=1, receipt 미발행).
+  if [[ -n "${EV:-}" && -d "${EV:-/nonexistent}" ]]; then
+    if ! copy_revoke_evidence; then log "EVIDENCE_COPY_FAILED — 회수 판정 원본 복사 실패"; rc=1; fi
+  fi
   # 완료 receipt(PR#40 리뷰 R3): 회수 확인 + 단계 정상(rc0) 또는 정책 승인 대기(rc3)일 때만 발행.
   # post-revoke-check.sh 는 이 receipt 가 없거나 값·해시가 다르면 판정 전에 STOP 한다. token 원문은 넣지 않는다.
   if [[ $verified == 1 && ( $rc == 0 || $rc == 3 ) && -n "${EV:-}" && -d "${EV:-/nonexistent}" ]]; then
@@ -146,6 +164,24 @@ sha_of() {
   [[ "$out" =~ ^[0-9a-f]{64}$ ]] || return 1
   printf '%s\n' "$out"
 }
+# 회수 판정·결속 원본을 $EV/11-revoke-verify/ 로 복사하고 SHA256SUMS 를 만든다(PR#43 리뷰 S3).
+# preflight-cluster.json 은 grant 전 단계라 항상 있어야 한다. verify-* 는 회수 확인을 한 회차에만 있다.
+copy_revoke_evidence() {
+  local d="$EV/11-revoke-verify" f n=0
+  mkdir -p "$d" || return 1
+  [[ -s "$WORKDIR/preflight-cluster.json" ]] || { log "EVIDENCE: preflight-cluster.json 없음"; return 1; }
+  cp -p -- "$WORKDIR/preflight-cluster.json" "$d/" || return 1
+  for f in "$WORKDIR"/verify-users.*.out "$WORKDIR"/verify-users.*.err "$WORKDIR"/verify-cani.*.out "$WORKDIR"/verify-cani.*.err; do
+    [[ -e "$f" ]] || continue
+    cp -p -- "$f" "$d/" || return 1
+    n=$((n + 1))
+  done
+  # 회수를 시도했는데 판정 원본이 하나도 없으면 근거가 빠진 것
+  if [[ "${grant_attempted:-0}" == 1 && $n -eq 0 ]]; then log "EVIDENCE: 회수 판정 원본(verify-*) 없음"; return 1; fi
+  ( cd "$d" && sha256sum -- * >SHA256SUMS ) || return 1
+  log "EVIDENCE_COPIED $d (verify 원본 ${n}개 + preflight)"
+}
+
 issue_receipt() {
   local status=COMPLETE f now h_old h_tgt h_uid h_inv h_rev tmp="$EV/99-receipt.env.tmp"
   [[ $1 == 3 ]] && status=POLICY_PENDING

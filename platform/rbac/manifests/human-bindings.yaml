@@ -63,3 +63,21 @@ kind: RoleBinding
 metadata: {name: jaehwan-monitoring-edit, namespace: fds-app, labels: {team: 321team, project: fds-hybrid, purpose: monitoring}}
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: monitoring-edit}
 subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: jaehwan}]
+---
+# --- 이하영: clusterversion/version 1개 get 만 (#6 수집기·#4 Basic Ready 수집기의 OpenShift 클러스터 UUID 대상 확인용)
+# 요청: infra-rosa#5 6258874244. list·watch·수정 없음, resourceNames 로 'version' 1개만.
+# ⑩-b 분류기는 이 ClusterRole 의 규칙이 아래와 정확히 같을 때만 APPROVED 로 본다(넓어지면 STOP).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: fds-clusterversion-reader, labels: {team: 321team, project: fds-hybrid, purpose: target-identity}}
+rules:
+  - apiGroups: ["config.openshift.io"]
+    resources: ["clusterversions"]
+    resourceNames: ["version"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: hayeoung-clusterversion-reader, labels: {team: 321team, project: fds-hybrid, purpose: target-identity}}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fds-clusterversion-reader}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: hayeoung}]

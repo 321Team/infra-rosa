@@ -74,11 +74,31 @@ run_steps() {
   # 대상 기록(PR#40 보완 3): post-revoke-check.sh 가 이 회차의 클러스터·API·사용자와 같은지 대조한다.
   printf 'CLUSTER_ID=%s\nAPI_URL=%s\nUSER=%s\nSTARTED_AT=%s\n' \
     "$CLUSTER_ID" "$API_URL" "$U" "$(date '+%FT%T%z')" >"$EV/00-target.env"
+  # grant 상태의 `rosa list users` 원문(기록만, 판정·중단 없음). [AFTER-CREATE] 머리글·본문 행 형식을 실측으로 확정하기 위한 증적.
+  local r
+  r=0; rosa list users -c "$CLUSTER_ID" >"$EV/03-granted-users.out" 2>"$EV/03-granted-users.err" || r=$?
+  printf 'granted-users rc=%s\n' "$r" >"$EV/03-granted-users.rc"
 
   # ④ 기본 상태 읽기(쓰기 없음). [AFTER-CREATE] dedicated-admins·cluster-admins 그룹 실제 이름, UWM 활성 여부
   # 없을 수 있는 두 항목은 실패해도 멈추지 않되, 실패 사실과 rc 를 반드시 기록한다(PR#40 보완 4 — 조용히 넘기지 않음).
   oc get groups -o yaml >"$EV/04-groups.yaml"
-  local r
+  # #4 Handoff(#38 인계표) 1번 OpenShift cluster UUID·3번 노드 Ready. 회수 뒤 namespace admin 으로는 읽을 수 없으므로
+  # cluster-admin 이 있는 지금 읽는다. 읽기 실패·값 없음이면 STOP(→ 회수). 판정(3/3 Ready 등)은 증적 리뷰에서 한다.
+  oc get clusterversion version -o json >"$EV/04-clusterversion.json" || { log "STOP: clusterversion 조회 실패"; return 1; }
+  oc get nodes -o json >"$EV/04-nodes.json" || { log "STOP: nodes 조회 실패"; return 1; }
+  oc get nodes -o wide >"$EV/04-nodes-wide.txt" || { log "STOP: nodes(wide) 조회 실패"; return 1; }
+  # 값은 변수에 먼저 받는다 — printf 인자 안의 $(...) 실패는 set -e 로 멈추지 않기 때문.
+  local cv_uuid cv_ver n_count n_rows
+  cv_uuid=$(jq -er '.spec.clusterID | select(type == "string" and length > 0)' "$EV/04-clusterversion.json") \
+    || { log "STOP: cluster UUID 없음/판독 실패"; return 1; }
+  cv_ver=$(jq -er '.status.desired.version | select(type == "string" and length > 0)' "$EV/04-clusterversion.json") \
+    || { log "STOP: cluster version 없음/판독 실패"; return 1; }
+  n_count=$(jq -er '.items | length | select(. > 0)' "$EV/04-nodes.json") \
+    || { log "STOP: 노드 0개/판독 실패"; return 1; }
+  n_rows=$(jq -er '.items[] | "NODE\t\(.metadata.name)\tReady=\([.status.conditions[]? | select(.type == "Ready") | .status][0] // "UNKNOWN")"' "$EV/04-nodes.json") \
+    || { log "STOP: 노드 행 판독 실패"; return 1; }
+  printf 'OPENSHIFT_CLUSTER_UUID=%s\nCLUSTER_VERSION=%s\nNODE_COUNT=%s\n%s\n' \
+    "$cv_uuid" "$cv_ver" "$n_count" "$n_rows" >"$EV/04-handoff-1-3.txt"
   r=0; oc get clusterrolebinding self-provisioners -o yaml >"$EV/04-self-provisioners.yaml" 2>&1 || r=$?
   printf 'self-provisioners rc=%s\n' "$r" >>"$EV/04-read-rc.txt"
   r=0; oc get pods -n openshift-user-workload-monitoring -o wide >"$EV/04-uwm-pods.txt" 2>&1 || r=$?
@@ -131,6 +151,11 @@ run_steps() {
   expect_cani J-6 no jaehwan -- oc auth can-i create rolebindings.rbac.authorization.k8s.io -n fds-app --as=jaehwan "${G[@]}"
   expect_cani J-7 no jaehwan -- oc auth can-i list nodes --as=jaehwan "${G[@]}"
   expect_cani J-8 no jaehwan -- oc auth can-i get secrets -n fds-app --as=jaehwan "${G[@]}"
+  # 하영 clusterversion/version get 최소 권한(#5 6258874244). --as 그룹에 cluster-admins 를 넣지 않으므로
+  # 임시 cluster-admin 이 아니라 이 바인딩만으로 판정된다. 회수 뒤에는 post-revoke-check.sh 가 본인 세션으로 다시 확인.
+  expect_cani H-1 yes "$U" -- oc auth can-i get clusterversions.config.openshift.io/version --as="$U" "${G[@]}"
+  expect_cani H-2 no  "$U" -- oc auth can-i list clusterversions.config.openshift.io --as="$U" "${G[@]}"
+  expect_cani H-3 no  "$U" -- oc auth can-i update clusterversions.config.openshift.io/version --as="$U" "${G[@]}"
 
   # ⑩ 배포 SA 실제 token 시험(900초 요청, 원문 미출력)
   oc create token fds-deployer -n ci-cd --duration=900s >"$WORKDIR/t"

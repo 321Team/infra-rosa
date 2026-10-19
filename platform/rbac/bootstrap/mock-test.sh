@@ -31,7 +31,11 @@ case "$1 $2" in
       nogroup) echo "ID        GROUPS"; echo "hayeoung" ;;                            # 33: 그룹 열 없는 행(R5)
       empty)  : ;;                                             # 출력 없음(형식 불명)
       broken) echo "<html>gateway timeout</html>" ;;           # 깨진 출력
+      # 44~48: 실측 빈 목록(#5 A단계 2026-10-18) — 머리글 없이 INFO 1줄(stdout)
+      noneinfo)  echo "INFO: There are no users configured for cluster '${MOCK_EMPTY_ID:-mock-id}'" ;;
+      noneinfo2) echo "INFO: There are no users configured for cluster '${MOCK_EMPTY_ID:-mock-id}'"; echo "hayeoung  cluster-admins" ;;
     esac
+    [[ -n "${MOCK_USERS_ERR:-}" ]] && echo "$MOCK_USERS_ERR" >&2
     exit "${MOCK_LIST_RC:-0}" ;;
 esac
 exit 0
@@ -77,6 +81,13 @@ if [[ "$1 $2" == "auth can-i" && "$*" == *"--as=jaehwan"* ]]; then
     *) echo no; exit 1 ;;
   esac
 fi
+# H-1~H-3: 하영 clusterversion/version get 최소 권한(--as=hayeoung, cluster-admins 그룹 없이). MOCK_CV_NOBIND = 바인딩 누락
+if [[ "$1 $2" == "auth can-i" && "$*" == *"--as=hayeoung"* ]]; then
+  case "$*" in
+    "auth can-i get clusterversions.config.openshift.io/version "*) [[ "${MOCK_CV_NOBIND:-0}" == 1 ]] && { echo no; exit 1; }; echo yes; exit 0 ;;
+    *) echo no; exit 1 ;;
+  esac
+fi
 if [[ "$1 $2" == "auth can-i" ]]; then
   rc="${MOCK_CANI_RC:-1}"
   case "$rc" in 0) echo yes ;; 1) echo no ;; esac
@@ -96,6 +107,18 @@ case "$*" in
     now=$(date +%s); life="${MOCK_TOKEN_LIFE:-900}"
     printf '%s.%s.sig\n' "$(printf '{"alg":"none"}' | b64u)" \
       "$(printf '{"sub":"system:serviceaccount:ci-cd:fds-deployer","aud":["https://kubernetes.default.svc"],"iat":%s,"exp":%s}' "$now" $((now + life)) | b64u)" ;;
+  # ④ 인계표 1·3번(clusterversion·nodes) — 49~51 실패 주입
+  "get clusterversion version -o json")
+    [[ "${MOCK_CV_RC:-0}" != 0 ]] && exit "$MOCK_CV_RC"
+    [[ "${MOCK_CV_EMPTY:-0}" == 1 ]] && { echo '{"spec":{},"status":{}}'; exit 0; }
+    echo '{"spec":{"clusterID":"00000000-0000-4000-8000-00000000mock"},"status":{"desired":{"version":"4.22.17"}}}' ;;
+  "get nodes -o json")
+    [[ "${MOCK_NODES_EMPTY:-0}" == 1 ]] && { echo '{"items":[]}'; exit 0; }
+    echo '{"items":['
+    echo '{"metadata":{"name":"ip-10-0-1-1.mock"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},'
+    echo '{"metadata":{"name":"ip-10-0-1-2.mock"},"status":{"conditions":[{"type":"Ready","status":"True"}]}},'
+    echo '{"metadata":{"name":"ip-10-0-1-3.mock"},"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}' ;;
+  "get nodes -o wide") echo "NAME STATUS ROLES" ;;
   # ⑩-b 권한 목록 수집용 합성 RBAC
   "get groups -o json") echo '{"items":[{"metadata":{"name":"cluster-admins"},"users":["hayeoung"]}]}' ;;
   "get clusterrolebindings -o json")
@@ -104,11 +127,15 @@ case "$*" in
     # 31: 로그인한 모든 사람에게 cluster-admin — 주체만 보면 '플랫폼 기본'처럼 보이는 위험 경로(보완 2)
     [[ "${MOCK_INV_AUTH_ADMIN:-0}" == 1 ]] && extra=',{"metadata":{"name":"authenticated-admin"},"roleRef":{"kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"Group","name":"system:authenticated"}]}'
     echo '{"items":[{"metadata":{"name":"cluster-admins"},"roleRef":{"kind":"ClusterRole","name":"cluster-admin"},"subjects":[{"kind":"Group","name":"cluster-admins"}]},
-      {"metadata":{"name":"self-provisioners"},"roleRef":{"kind":"ClusterRole","name":"self-provisioner"},"subjects":[{"kind":"Group","name":"system:authenticated:oauth"}]}'"$extra"']}' ;;
+      {"metadata":{"name":"self-provisioners"},"roleRef":{"kind":"ClusterRole","name":"self-provisioner"},"subjects":[{"kind":"Group","name":"system:authenticated:oauth"}]},
+      {"metadata":{"name":"hayeoung-clusterversion-reader"},"roleRef":{"kind":"ClusterRole","name":"fds-clusterversion-reader"},"subjects":[{"kind":"User","name":"hayeoung"}]}'"$extra"']}' ;;
   "get rolebindings -n "*" -o json")
     echo '{"items":[{"metadata":{"name":"hayeoung-admin"},"roleRef":{"kind":"ClusterRole","name":"admin"},"subjects":[{"kind":"User","name":"hayeoung"}]}]}' ;;
   "get clusterrole self-provisioner -o json")   # 32x: 승인 목록 이름이지만 규칙이 바뀐 경우(R1)
     if [[ "${MOCK_SP_RULES:-0}" == 1 ]]; then echo '{"kind":"ClusterRole","rules":[{"apiGroups":[""],"resources":["secrets"],"verbs":["get"]}]}'; else echo '{"kind":"ClusterRole"}'; fi ;;
+  "get clusterrole fds-clusterversion-reader -o json")   # 53: 키트 ClusterRole 규칙이 넓어진 경우(list 추가)
+    v='"get"'; [[ "${MOCK_CV_RULES_WIDE:-0}" == 1 ]] && v='"get","list"'
+    echo '{"kind":"ClusterRole","rules":[{"apiGroups":["config.openshift.io"],"resources":["clusterversions"],"resourceNames":["version"],"verbs":['"$v"']}]}' ;;
   "get clusterrole "*" -o json") echo '{"kind":"ClusterRole"}' ;;
 esac
 exit 0
@@ -118,7 +145,12 @@ chmod +x "$T/bin/rosa" "$T/bin/oc"
 real_sha=$(command -v sha256sum); real_mv=$(command -v mv)
 printf '#!/usr/bin/env bash\nfor a in "$@"; do [[ -n "${MOCK_SHA_FAIL:-}" && "$a" == *"$MOCK_SHA_FAIL" ]] && { echo "mock sha256sum failure" >&2; exit 42; }; done\nexec %q "$@"\n' "$real_sha" >"$T/bin/sha256sum"
 printf '#!/usr/bin/env bash\n[[ "${MOCK_MV_FAIL:-0}" == 1 && "$*" == *99-receipt.env* ]] && { echo "mock mv failure" >&2; exit 1; }\nexec %q "$@"\n' "$real_mv" >"$T/bin/mv"
-chmod +x "$T/bin/sha256sum" "$T/bin/mv"
+real_cp=$(command -v cp)
+printf '#!/usr/bin/env bash
+[[ "${MOCK_CP_FAIL:-0}" == 1 && "$*" == *verify-users.* ]] && { echo "mock cp failure" >&2; exit 1; }
+exec %q "$@"
+' "$real_cp" >"$T/bin/cp"   # PR#43 S3: 원본 복사 실패 주입
+chmod +x "$T/bin/sha256sum" "$T/bin/mv" "$T/bin/cp"
 
 mk_steps() { # $1 name, $2 body
   printf 'run_steps() {\n%s\n}\n' "$2" >"$T/$1.sh"
@@ -243,19 +275,47 @@ run_case 37_mgmt_row_without_groups     normal   1 MOCK_USERS_MODE=nogroup
 # 리뷰 5530751510 R3: receipt 해시 계산 실패·확정(rename) 실패 → 완료 receipt 없음, rc1 (회수는 정상)
 REQUIRE_ERR='RECEIPT: 회수 전 세션 해시 실패' run_case 42_receipt_hash_fail template 1 MOCK_TOKEN=1 MOCK_SHA_FAIL=rosa-idp/kubeconfig
 REQUIRE_ERR='RECEIPT: 확정\(rename\) 실패'      run_case 43_receipt_rename_fail template 1 MOCK_TOKEN=1 MOCK_MV_FAIL=1
+# #5 A단계 실측(2026-10-18): 빈 목록은 머리글 없이 INFO 1줄. 정확히 이 클러스터 ID·1줄·stderr 없음·rc0 일 때만 부재
+REQUIRE_ERR='REVOKE_VERIFIED' run_case 44_mgmt_empty_info_line normal 0 MOCK_USERS_MODE=noneinfo
+run_case 45_mgmt_empty_info_other_id    normal 1 MOCK_USERS_MODE=noneinfo MOCK_EMPTY_ID=other-id
+run_case 46_mgmt_empty_info_stderr      normal 1 MOCK_USERS_MODE=noneinfo MOCK_USERS_ERR='WARN: token expiring'
+run_case 47_mgmt_empty_info_extra_line  normal 1 MOCK_USERS_MODE=noneinfo2
+run_case 48_mgmt_empty_info_rc42        normal 1 MOCK_USERS_MODE=noneinfo MOCK_LIST_RC=42
+# 인계표 1·3번 읽기 실패·값 없음 → ⑤ 적용·token 전에 STOP, 회수 1회
+FORBID='^oc apply|create token' run_case 49_tmpl_clusterversion_rc42 template 1 MOCK_CV_RC=42
+FORBID='^oc apply|create token' run_case 50_tmpl_clusterversion_no_uuid template 1 MOCK_CV_EMPTY=1
+FORBID='^oc apply|create token' run_case 51_tmpl_no_nodes template 1 MOCK_NODES_EMPTY=1
+# PR#43 리뷰 S3: 회수 판정 원본 복사 실패 → 완료로 보고하지 않음(rc1, receipt 없음). 회수 자체는 정상(revoke 1)
+REQUIRE_ERR='EVIDENCE_COPY_FAILED' run_case 52_revoke_evidence_copy_fail template 1 MOCK_TOKEN=1 MOCK_CP_FAIL=1
+# #5 6258874244: 하영 clusterversion/version get 최소 권한. 키트 ClusterRole 규칙이 넓어지면 회수 전 STOP, 바인딩이 빠지면 H-1 에서 STOP
+run_case 53_cv_reader_rules_widened_stops template 1 MOCK_TOKEN=1 MOCK_CV_RULES_WIDE=1
+FORBID='create token' run_case 54_cv_reader_binding_missing_stops template 1 MOCK_TOKEN=1 MOCK_CV_NOBIND=1
+unset FORBID
 
 # 증적 확인(보완 3·4, 리뷰 R3): 25 정상 회차 / 34 정책 대기 회차의 target·read-rc·분류·receipt
 ev_of() { ls -d "$T"/home-"$1"/rosa-idp/evidence-* 2>/dev/null | head -1; }
 ev25=$(ev_of 25_steps_full_success); ev34=$(ev_of 34_policy_pending_rc3)
 ok=PASS
+# PR#43 리뷰 S3: 회수 판정·결속 원본이 증적 폴더(11-revoke-verify)에 복사되고 SHA256SUMS 로 검산된다(정상·정책대기·실패 회차)
+for e in "$ev25" "$ev34" "$(ev_of 28_inventory_unexpected)"; do
+  d="$e/11-revoke-verify"
+  [[ -s "$d/preflight-cluster.json" && -s "$d/verify-users.1.out" && -e "$d/verify-cani.1.out" && -s "$d/SHA256SUMS" ]] || { ok=FAIL; echo "  S3: 원본 누락 $d"; continue; }
+  ( cd "$d" && sha256sum -c --quiet SHA256SUMS ) >/dev/null 2>&1 || { ok=FAIL; echo "  S3: SHA256SUMS 불일치 $d"; }
+done
 grep -qx 'CLUSTER_ID=mock-id' "$ev25/00-target.env" 2>/dev/null && grep -qx 'USER=hayeoung' "$ev25/00-target.env" || ok=FAIL
 [[ $(grep -c ' rc=' "$ev25/04-read-rc.txt" 2>/dev/null) == 2 ]] || ok=FAIL
 grep -q $'^REVOKE_TARGET\tcluster\tcluster-admins' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
 grep -q $'^PLATFORM_DEFAULT\tcluster\tself-provisioners' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL
+grep -q $'^APPROVED\tcluster\thayeoung-clusterversion-reader\tClusterRole\tfds-clusterversion-reader' "$ev25/10b-path-review.tsv" 2>/dev/null || ok=FAIL   # #5 6258874244
 grep -qx 'STATUS=COMPLETE' "$ev25/99-receipt.env" 2>/dev/null && grep -qx 'FINAL_RC=0' "$ev25/99-receipt.env" || ok=FAIL
+# 인계표 1·3번 기록, grant 상태 rosa list users 원문 기록
+grep -qx 'OPENSHIFT_CLUSTER_UUID=00000000-0000-4000-8000-00000000mock' "$ev25/04-handoff-1-3.txt" 2>/dev/null || ok=FAIL
+grep -qx 'NODE_COUNT=3' "$ev25/04-handoff-1-3.txt" 2>/dev/null || ok=FAIL
+[[ $(grep -c $'\tReady=True$' "$ev25/04-handoff-1-3.txt" 2>/dev/null) == 3 ]] || ok=FAIL
+grep -qx 'granted-users rc=0' "$ev25/03-granted-users.rc" 2>/dev/null && [[ -s "$ev25/03-granted-users.out" ]] || ok=FAIL
 # R3: receipt 의 해시 5개가 모두 64자리 hex(빈 값 없음), namespace UID 파일 포함
 [[ $(grep -cE '^(OLD_KUBECONFIG|TARGET|NS_UID|INVENTORY_SUMS|PATH_REVIEW)_SHA256=[0-9a-f]{64}$' "$ev25/99-receipt.env" 2>/dev/null) == 5 ]] || ok=FAIL
-for n in 42_receipt_hash_fail 43_receipt_rename_fail; do   # 실패 회차엔 receipt 도 임시 파일도 없음
+for n in 42_receipt_hash_fail 43_receipt_rename_fail 52_revoke_evidence_copy_fail; do   # 실패 회차엔 receipt 도 임시 파일도 없음
   e=$(ev_of "$n"); [[ -n "$e" ]] || { ok=FAIL; continue; }
   [[ -e "$e/99-receipt.env" || -e "$e/99-receipt.env.tmp" ]] && ok=FAIL
 done

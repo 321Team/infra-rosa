@@ -50,6 +50,14 @@ rules_sha() {
 }
 auth_re='^Group:system:authenticated(:oauth)?(,Group:system:authenticated(:oauth)?)*$'
 
+# 키트 manifest(human-bindings.yaml)의 fds-clusterversion-reader 규칙을 같은 정규화로 해시한 기대값.
+# manifest 를 바꾸면 이 JSON 도 같은 PR 에서 같이 바꾼다.
+CV_READER_JSON='{"kind":"ClusterRole","rules":[{"apiGroups":["config.openshift.io"],"resources":["clusterversions"],"resourceNames":["version"],"verbs":["get"]}]}'
+CV_READER_SHA=$(printf '%s\n' "$CV_READER_JSON" | jq -cS '{rules: (.rules // []), aggregationRule: (.aggregationRule // null)}' | sha256sum) \
+  || { echo "STOP: clusterversion-reader 기대 해시 계산 실패" >&2; exit 1; }
+CV_READER_SHA=${CV_READER_SHA%% *}
+[[ "$CV_READER_SHA" =~ ^[0-9a-f]{64}$ ]] || { echo "STOP: clusterversion-reader 기대 해시 형식 오류" >&2; exit 1; }
+
 pending=0; bad=0
 : >"$OUT"
 while IFS= read -r line; do
@@ -64,6 +72,17 @@ while IFS= read -r line; do
   elif [[ "$scope" == fds-app && "$binding" == "$U-monitoring-edit" && "$kind" == ClusterRole \
           && "$name" == monitoring-edit && "$subjects" == "User:$U" ]]; then
     c=APPROVED
+  elif [[ "$scope" == cluster && "$binding" == "$U-clusterversion-reader" && "$kind" == ClusterRole \
+          && "$name" == fds-clusterversion-reader && "$subjects" == "User:$U" ]]; then
+    # 키트가 만드는 cluster 범위 최소 권한(clusterversion/version get, #5 6258874244).
+    # 이름만으로 승인하지 않는다 — 수집된 규칙이 manifest 와 정확히 같을 때만 APPROVED(넓어지면 STOP).
+    rf="$INV/clusterrole-$name.json"
+    if [[ ! -s "$rf" ]]; then
+      why="ClusterRole 수집 파일 없음"
+    else
+      got=$(rules_sha "$rf") || { echo "STOP: ClusterRole JSON·정규화·해시 실패($rf)" >&2; exit 1; }
+      if [[ "$got" == "$CV_READER_SHA" ]]; then c=APPROVED; else why="fds-clusterversion-reader 규칙이 manifest 와 다름"; fi
+    fi
   elif [[ "$scope" == cluster && "$kind" == ClusterRole && "$name" == cluster-admin && "$subjects" == "Group:cluster-admins" ]]; then
     c=REVOKE_TARGET
   elif [[ "$kind" == ClusterRole && "$subjects" =~ $auth_re ]]; then

@@ -18,6 +18,11 @@ U="${U:-hayeoung}"
 WORKDIR="${WORKDIR:-$HOME/rosa-idp}"
 ROSA_USERS_HEADER_RE="${ROSA_USERS_HEADER_RE:-^ID[[:space:]]+GROUPS[[:space:]]*$}"   # [AFTER-CREATE] 실제 머리글로 확정
 ROSA_USERS_ROW_RE="${ROSA_USERS_ROW_RE:-^[a-z0-9][a-z0-9._@-]*[[:space:]]+(cluster-admins|dedicated-admins)(,(cluster-admins|dedicated-admins))*[[:space:]]*$}"
+# 빈 목록 출력(#5 A단계 실측, 2026-10-18) — bootstrap-session.sh 와 같은 규칙. rc0 + stderr 없음 + 정확히 이 1줄일 때만 부재.
+ROSA_USERS_EMPTY_LINE="INFO: There are no users configured for cluster '$CLUSTER_ID'"
+users_list_empty() { # out err
+  [[ ! -s "$2" && "$(wc -l <"$1")" -eq 1 && "$(<"$1")" == "$ROSA_USERS_EMPTY_LINE" ]]
+}
 KIT_DIR="${KIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 POLICY_FILE="${POLICY_FILE:-$KIT_DIR/../policy/platform-defaults.approved.tsv}"
 BOOT_EV="${1:?usage: post-revoke-check.sh <bootstrap EVIDENCE_DIR>}"
@@ -60,12 +65,15 @@ run() { # id kubeconfig expect_set(예: DENY|UNAUTH) -- cmd...
   LAST=$got
 }
 cani() { # id kubeconfig -- can-i args (정확한 no 만 PASS)
-  local id=$1 kc=$2; shift 3
+  cani_want no "$@"
+}
+cani_want() { # want(yes|no) id kubeconfig -- can-i args — 정확한 yes/no 와 rc 가 기대와 같아야 PASS
+  local want=$1 id=$2 kc=$3; shift 4
   local rc=0 got=OTHER
   KUBECONFIG="$kc" oc auth can-i "$@" >"$EV/$id.out" 2>"$EV/$id.err" || rc=$?
   [[ $rc -eq 1 && "$(<"$EV/$id.out")" == no && ! -s "$EV/$id.err" ]] && got=no
   [[ $rc -eq 0 && "$(<"$EV/$id.out")" == yes ]] && got=yes
-  rec "$id" "can-i $*" no "$got" "$rc"
+  rec "$id" "can-i $*" "$want" "$got" "$rc"
 }
 
 [[ -f "$OLD" ]] || { log "STOP: 회수 전 세션 kubeconfig 없음($OLD) — D-11b 판정 불가"; exit 1; }
@@ -172,12 +180,18 @@ done
 cani D-11c-all  "$NEW" -- '*' '*' --all-namespaces
 cani D-11c-crb  "$NEW" -- create clusterrolebindings.rbac.authorization.k8s.io
 cani D-11c-node "$NEW" -- list nodes
+# 하영 clusterversion/version get 최소 권한(#5 6258874244) — 회수 뒤 본인 세션에서 get 만 yes, 나머지 no
+cani_want yes D-11a-cv-get  "$NEW" -- get clusterversions.config.openshift.io/version
+cani_want no  D-11a-cv-list "$NEW" -- list clusterversions.config.openshift.io
+cani_want no  D-11a-cv-upd  "$NEW" -- update clusterversions.config.openshift.io/version
 
-# D-11c ① — 관리면 grant 기록. [AFTER-CREATE] 머리글 형식 확정 전에는 UNKNOWN 으로 남는다.
+# D-11c ① — 관리면 grant 기록. 실측 빈 목록 1줄이면 부재, 그 밖에는 머리글·본문 형식이 맞을 때만 판정.
 rc=0; rosa list users -c "$CLUSTER_ID" >"$EV/D-11c-mgmt.out" 2>"$EV/D-11c-mgmt.err" || rc=$?
 m=UNKNOWN
 # 머리글 + 본문 전 행 형식이 맞을 때만 판정(R5). 깨진 본문·그룹 없는 행은 UNKNOWN.
-if [[ $rc -eq 0 ]] && head -n 1 "$EV/D-11c-mgmt.out" | grep -Eq "$ROSA_USERS_HEADER_RE" \
+if [[ $rc -eq 0 ]] && users_list_empty "$EV/D-11c-mgmt.out" "$EV/D-11c-mgmt.err"; then
+  m=ABSENT
+elif [[ $rc -eq 0 ]] && head -n 1 "$EV/D-11c-mgmt.out" | grep -Eq "$ROSA_USERS_HEADER_RE" \
    && tail -n +2 "$EV/D-11c-mgmt.out" | awk -v re="$ROSA_USERS_ROW_RE" 'NF == 0 { next } $0 !~ re { bad = 1 } END { exit bad }'; then
   if tail -n +2 "$EV/D-11c-mgmt.out" | awk -v u="$U" '$1 == u { n = split($2, g, ","); for (i = 1; i <= n; i++) if (g[i] == "cluster-admins") f = 1 } END { exit !f }'; then
     m=PRESENT
