@@ -252,8 +252,9 @@ run_case 28_inventory_unexpected template 1 MOCK_TOKEN=1 MOCK_INV_UNEXPECTED=1  
 unset FORBID
 # PR#37 리뷰(이재환 #1): 회수(revoke) 도중 Ctrl+C(프로세스 그룹 INT)가 와도 회수·확인을 끝까지 하고 기록을 남긴다
 USE_SETSID=1 REQUIRE_ERR='REVOKE_VERIFIED' run_case 29_ctrl_c_during_revoke normal 0 MOCK_INT_DURING_REVOKE=1
-# 대조(29b): 회수 중 무시(trap '' INT TERM)를 뺀 사본은 같은 상황에서 INT 로 죽어야 한다 — 29 가 의미 있는 시험인지 확인
-grep -v "^  trap '' INT TERM$" "$HERE/bootstrap-session.sh" >"$T/wrapper-nofix.sh"
+# 대조(29b): 회수 중 INT·TERM 무시를 뺀 사본(PIPE 무시는 남김)은 같은 상황에서 INT 로 죽어야 한다 — 29 가 의미 있는 시험인지 확인
+sed "s/^  trap '' INT TERM PIPE\$/  trap '' PIPE/" "$HERE/bootstrap-session.sh" >"$T/wrapper-nofix.sh"
+cmp -s "$HERE/bootstrap-session.sh" "$T/wrapper-nofix.sh" && { echo "FAIL: 29b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 WRAPPER="$T/wrapper-nofix.sh" USE_SETSID=1 FORBID_ERR='REVOKE_VERIFIED' run_case 29b_without_fix_dies normal nonzero MOCK_INT_DURING_REVOKE=1
 
 # PR#40 보완 5: RBAC 이 아닌 403(quota)을 '정상 거부'로 보지 않음 → D-01 에서 STOP
@@ -297,16 +298,17 @@ FORBID='^oc apply|create token' REQUIRE_ERR='grant 반영 대기 시간 초과' 
 unset FORBID REQUIRE_ERR
 
 # 56: #5 2회차 재현 — 화면 파이프(tee)가 먼저 끊긴 뒤에도 회수(revoke)·회수 확인을 끝까지 한다.
-#     읽는 쪽이 첫 바이트만 읽고 끝나면(head -c1) 이후 래퍼의 화면 쓰기는 SIGPIPE 를 받는다.
+#     2회차 순서 그대로: 읽는 쪽(tee 대신 sed)이 GRANT_OK 줄에서 끝나 파이프가 닫힌 뒤, 단계 중 Ctrl+C(INT)가 온다.
+#     → cleanup 의 첫 로그 쓰기가 SIGPIPE 를 받는다(단계 파일은 그 사이 화면에 아무것도 쓰지 않음).
 #     대조(56b): PIPE 처리를 뺀 사본은 같은 상황에서 revoke 없이 죽어야 한다 — 56 이 의미 있는 시험인지 확인.
-mk_steps slow 'echo STEP1 >>"$MOCK_LOG"; sleep 1; echo STEP2 >&2; sleep 1; echo STEP3 >>"$MOCK_LOG"'
+mk_steps slow 'echo STEP1 >>"$MOCK_LOG"; sleep 1; kill -INT $$; sleep 1; echo STEP2_AFTER_INT >>"$MOCK_LOG"'
 sed -e "/^trap 'exit 141' PIPE\$/d" -e "s/^  trap '' INT TERM PIPE\$/  trap '' INT TERM/" "$HERE/bootstrap-session.sh" >"$T/wrapper-nopipe.sh"
 cmp -s "$HERE/bootstrap-session.sh" "$T/wrapper-nopipe.sh" && { echo "FAIL: 56b 대조 사본이 원본과 같음(치환 실패)"; failures=1; }
 pipe_case() { # name wrapper expect(revoked|died)
   local name=$1 w=$2 want=$3 log="$T/$1.log"; : >"$log"
   env PATH="$T/bin:$PATH" MOCK_LOG="$log" HOME="$T/home-$name" CLUSTER_ID=mock-id API_URL=https://api.mock:443 \
       DEADLINE_EPOCH=$(( $(date +%s) + 600 )) VERIFY_TRIES=2 VERIFY_INTERVAL=0 \
-      bash "$w" "$T/slow.sh" 2>&1 | head -c 1 >/dev/null
+      bash "$w" "$T/slow.sh" 2>&1 | sed -n '/GRANT_OK/q'
   local rc=${PIPESTATUS[0]}
   local rv; rv=$(grep -c '^rosa revoke' "$log" || true)
   local vf; vf=$(grep -c 'REVOKE_VERIFIED' "$T/home-$name/rosa-idp/session-events.log" 2>/dev/null || true)
