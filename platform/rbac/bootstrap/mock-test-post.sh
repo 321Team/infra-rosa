@@ -24,6 +24,13 @@ if [[ $mode == OLD ]]; then
   esac
   exit 0
 fi
+# 61·61b·62 / P35·P36: 기본 project 가 있는 세션에서 cluster 범위 can-i(-n·--all-namespaces·--list 없음)에 oc 가 내는 경고 주입
+if [[ "${1:-} ${2:-}" == "auth can-i" && " $* " != *" -n "* && "$*" != *--all-namespaces* && "$*" != *--list* ]]; then
+  case "${MOCK_SCOPE_WARN:-0}" in
+    1)     printf "Warning: resource '%s' is not namespace scoped\n\n" "${4%%/*}" >&2 ;;
+    other) echo "Warning: unexpected server notice" >&2 ;;
+  esac
+fi
 case "$a" in
   "login "*) : >"$KUBECONFIG"; exit 0 ;;
   "logout") exit 0 ;;
@@ -182,4 +189,7 @@ case_ P34_cv_reader_missing_after_revoke 1 MOCK_CV_NOBIND=1
 case_ P31_mgmt_empty_info_line      0 MOCK_USERS_MODE=noneinfo
 case_ P32_mgmt_empty_info_other_id  1 MOCK_USERS_MODE=noneinfo MOCK_EMPTY_ID=other-id
 case_ P33_mgmt_empty_info_stderr    1 MOCK_USERS_MODE=noneinfo MOCK_USERS_ERR='WARN: token expiring'
+# #5 3회차 J-7(6264116497): 새 세션 cluster 범위 can-i(D-11c-crb·node, D-11a-cv-*)의 scope 경고 1종은 PASS 판정에 영향 없음. 다른 stderr 는 FAIL
+case_ P35_scope_warning_accepted    0 MOCK_SCOPE_WARN=1
+case_ P36_other_stderr_fails        1 MOCK_SCOPE_WARN=other
 exit "$fail"

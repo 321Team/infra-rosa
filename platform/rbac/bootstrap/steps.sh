@@ -34,6 +34,10 @@ expect() {
   [[ "$got" == "$want" ]] || { log "STOP: $id expect=$want got=$got rc=$rc"; return 1; }
 }
 
+# stderr 가 비었거나, cluster 범위 자원 질의에 oc 가 내는 아래 경고 1종(과 빈 줄)뿐이면 참. 그 밖의 stderr 는 판정 불가(#5 3회차 J-7 6264116497).
+#   Warning: resource 'nodes' is not namespace scoped   ← 세션 기본 project 가 있을 때 nodes·clusterversions 질의에서 나옴
+_scope_warning_only() { ! grep -qvE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped)?$" "$1"; }
+
 # expect_cani <id> <yes|no> <subject> -- <oc auth can-i args...>  (SSAR/SAR: 정확한 yes/no 만 인정)
 expect_cani() {
   local id=$1 want=$2 subj=$3; shift 4
@@ -41,7 +45,7 @@ expect_cani() {
   "$@" >"$out" 2>"$err" || rc=$?
   got=OTHER
   [[ $rc -eq 0 && "$(<"$out")" == yes ]] && got=yes
-  [[ $rc -eq 1 && "$(<"$out")" == no && ! -s "$err" ]] && got=no
+  [[ $rc -eq 1 && "$(<"$out")" == no ]] && _scope_warning_only "$err" && got=no
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$subj" "$*" "$want" "$got" "$rc" >>"$EV/results.tsv"
   [[ "$got" == "$want" ]] || { log "STOP: $id expect=$want got=$got rc=$rc"; return 1; }
 }
