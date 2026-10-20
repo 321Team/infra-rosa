@@ -214,10 +214,14 @@ for sa in fds-engine-sa transaction-api-sa; do
   fi
 done
 
-# ---- admission: 앱 SA 단독 주체(-z)로 Deployment별 평가 ----
-# -z 없이 실행하면 self-subject review가 되어 실행자 권한이 섞인다.
+# ---- admission: 앱 SA의 실제 신원(사용자 + 그룹)으로 Deployment별 평가 ----
+# 주체를 비우면 self-subject review가 되어 실행자 권한이 섞인다. 그래서 SA 사용자를 명시한다.
+# restricted-v2 사용 권한은 system:authenticated 그룹에 RBAC로 주어지므로, -z(SA 이름만)로 물으면
+# 그 그룹이 빠져 portable도 <none>이 나온다(2026-10-20 ROSA 실측 RC20). 실제 SA 토큰이 갖는 그룹을 함께 넣는다.
 while IFS=$'\t' read -r v name sa; do
-  run "review-$v-$name" "${OC[@]}" -n "$NS" adm policy scc-subject-review -z "$sa" \
+  run "review-$v-$name" "${OC[@]}" -n "$NS" adm policy scc-subject-review \
+    -u "system:serviceaccount:$NS:$sa" \
+    -g "system:authenticated,system:serviceaccounts,system:serviceaccounts:$NS" \
     -f "$OUT_DIR/deploy-$v-$name.json" -o json
 done <"$OUT_DIR/targets.tsv"
 
