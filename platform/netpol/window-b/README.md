@@ -46,11 +46,15 @@ python3 platform/netpol/window-b/check_window_b_np.py platform/netpol/window-b/2
 - 창 끝(⑨): 같은 이름·UID·`spec` SHA-256이 그대로인지, 정책 목록이 1번과 같은지(늘거나 줄지 않음) readback만 합니다. 달라졌으면 HOLD·보고(되돌리지 않음).
 
 **경우 B — 새로 만들기 (`CREATED_THIS_WINDOW=true`)**
-- 만들기: `oc create -f platform/netpol/window-b/20-coldpull-probe-egress.yaml -o jsonpath='{.metadata.uid}'` → 성공한 경우에만 **생성 UID**와 `CREATED_THIS_WINDOW=true` 기록(`apply`가 아니라 `create`: 기존 객체를 덮어쓰지 않음). 생성이 실패하면 UID 없음·`CREATED_THIS_WINDOW=false`로 기록하고 HOLD
+- 만들기: `oc create -f platform/netpol/window-b/20-coldpull-probe-egress.yaml -o jsonpath='{.metadata.uid}'` → 성공한 경우에만 **생성 UID**와 `CREATED_THIS_WINDOW=true` 기록(`apply`가 아니라 `create`: 기존 객체를 덮어쓰지 않음)
+- 만들기 실패·timeout·UID 수신 실패: 서버에 저장된 뒤 응답만 끊겼을 수 있으므로 `false`로 바로 확정하지 않고 **생성 결과 불명확(`CREATED_THIS_WINDOW=UNKNOWN`)**으로 기록하고 HOLD합니다. 자동 재시도·삭제는 하지 않습니다. 창 B 카드 P7 readback·inventory로 정확한 이름 `coldpull-probe-egress-window-b`를 조회해
+  - 정상 NotFound면 미생성으로 보고 `CREATED_THIS_WINDOW=false`로 확정
+  - 객체가 있으면 UID·원문(`-o yaml`)을 보존하고 **소유 미확정 잔여**로 권욱 님께 보고(이 창이 만든 것으로 추정해 지우지 않음)
+  - 조회도 실패하면 `UNKNOWN`을 유지하고 보고
 - readback: `oc -n fds-app get networkpolicy coldpull-probe-egress-window-b -o yaml` 원본 보존, 정책 목록이 1번 대비 **이 정책 1개만 늘었는지** 대조
 - 창 끝(⑨): `oc -n fds-app get networkpolicy coldpull-probe-egress-window-b -o jsonpath='{.metadata.uid}'`가 **생성 UID와 같을 때만** `oc -n fds-app delete networkpolicy coldpull-probe-egress-window-b --wait=true` → 같은 이름 NotFound, 정책 목록이 1번과 같음(플랫폼 00~03 그대로)
 
-**멈추는 조건:** 예상 밖 정책, 목록 불일치, UID 불일치·조회 오류 → 지우지 않고 HOLD·보고. `CREATED_THIS_WINDOW=false`인 정책은 어떤 경우에도 지우지 않습니다. 자동 재시도·다른 정책 삭제·디렉터리 일괄 delete 없음.
+**멈추는 조건:** 예상 밖 정책, 목록 불일치, UID 불일치·조회 오류·생성 결과 불명확(`UNKNOWN`) → 지우지 않고 HOLD·보고. `CREATED_THIS_WINDOW=false`·`UNKNOWN`인 정책과 소유 불명 객체는 어떤 경우에도 지우지 않습니다. 자동 재시도·다른 정책 삭제·디렉터리 일괄 delete 없음.
 
 💰 이 정책은 과금 자원을 만들지 않습니다.
 
