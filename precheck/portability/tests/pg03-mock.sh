@@ -92,7 +92,10 @@ PY
     [[ "$SCENARIO" == sa_403 ]] && { echo 'Error from server (Forbidden): serviceaccounts is forbidden' >&2; exit 1; }
     [[ "$SCENARIO" == sa_absent ]] && { echo 'Error from server (NotFound): serviceaccounts "x" not found' >&2; exit 1; }
     printf 'sa-uid'; exit 0;;
-  "-n fds-app adm policy scc-subject-review -z "*)
+  "-n fds-app adm policy scc-subject-review -u system:serviceaccount:fds-app:"*)
+    # 그룹이 빠지면 실제 클러스터처럼 portable도 허용되지 않는다(2026-10-20 RC20 재현).
+    [[ "$args" == *" -g system:authenticated,system:serviceaccounts,system:serviceaccounts:fds-app "* ]] || { printf '{"apiVersion":"security.openshift.io/v1","kind":"PodSecurityPolicySubjectReview","status":{"template":{}}}
+'; exit 0; }
     [[ "$args" == *" -o json" ]] || exit 96
     variant=portable; [[ "$args" == *deploy-fixed-* ]] && variant=fixed
     [[ "$SCENARIO" == review_rc7 ]] && { echo 'error: unsupported object' >&2; exit 7; }
@@ -218,14 +221,14 @@ grep -q 'ALLOWED_BY_OTHER_SCC:anyuid' "$T/out-fixed_broad/admission-result.txt"
 for s in json_list real_fixture; do
   check "$s" 0 yes SCENARIO="$s"
   grep -q '^SUMMARY=ADMISSION_AS_EXPECTED$' "$T/out-$s/admission-result.txt"
-  [[ "$(grep -c 'scc-subject-review -z' "$CALLLOG")" == 4 ]] || { echo "FAIL $s: review count"; exit 1; }
+  [[ "$(grep -c 'scc-subject-review -u system:serviceaccount:fds-app:' "$CALLLOG")" == 4 ]] || { echo "FAIL $s: review count"; exit 1; }
 done
 
 # 정상: 리뷰 4건(-z 앱 SA), SA/Service/NetworkPolicy는 리뷰하지 않음
 check ok 0 yes SCENARIO=ok
-[[ "$(grep -c 'scc-subject-review -z' "$CALLLOG")" == 4 ]]
-grep -q 'scc-subject-review -z fds-engine-sa' "$CALLLOG"
-grep -q 'scc-subject-review -z transaction-api-sa' "$CALLLOG"
+[[ "$(grep -c 'scc-subject-review -u system:serviceaccount:fds-app:' "$CALLLOG")" == 4 ]]
+grep -q 'scc-subject-review -u system:serviceaccount:fds-app:fds-engine-sa -g system:authenticated,system:serviceaccounts,system:serviceaccounts:fds-app' "$CALLLOG"
+grep -q 'scc-subject-review -u system:serviceaccount:fds-app:transaction-api-sa -g system:authenticated,system:serviceaccounts,system:serviceaccounts:fds-app' "$CALLLOG"
 ! grep -q 'scc-subject-review -f' "$CALLLOG"
 grep -q '^SUMMARY=ADMISSION_AS_EXPECTED$' "$T/out-ok/admission-result.txt"
 grep -q '^CLUSTER_MUTATION=NONE$' "$T/out-ok/admission-result.txt"
