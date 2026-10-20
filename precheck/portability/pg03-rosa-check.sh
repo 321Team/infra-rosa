@@ -160,9 +160,33 @@ import json, sys, os
 out, ns = sys.argv[1], sys.argv[2]
 EXPECT = {'fds-engine': 'fds-engine-sa', 'transaction-api': 'transaction-api-sa'}
 targets = []
+
+def read_objects(path):
+    """oc create --dry-run=client -o json 출력을 읽는다.
+    oc 4.22.17은 여러 객체를 List 하나가 아니라 JSON 객체를 이어 붙여 출력한다(2026-10-20 ROSA 실측).
+    List 하나든 이어 붙인 객체든 받고, 객체가 없거나 중간에 깨졌으면 실패한다."""
+    text = open(path).read()
+    dec, pos, objs = json.JSONDecoder(), 0, []
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos == len(text):
+            break
+        obj, pos = dec.raw_decode(text, pos)
+        if not isinstance(obj, dict):
+            raise ValueError('top-level JSON value is not an object')
+        if obj.get('kind') == 'List':
+            if not isinstance(obj.get('items'), list):
+                raise ValueError('List without items')
+            objs.extend(obj['items'])
+        else:
+            objs.append(obj)
+    if not objs or not all(isinstance(o, dict) for o in objs):
+        raise ValueError('no objects')
+    return objs
+
 for v in ('portable', 'fixed'):
-    doc = json.load(open(os.path.join(out, f'json-{v}.out')))
-    items = doc['items'] if doc.get('kind') == 'List' else [doc]
+    items = read_objects(os.path.join(out, f'json-{v}.out'))
     deps = [i for i in items if i.get('kind') == 'Deployment']
     names = sorted(d['metadata']['name'] for d in deps)
     assert names == sorted(EXPECT), names

@@ -48,6 +48,11 @@ case "$args" in
   whoami) echo mock-user; exit 0;;
   version) echo 'MOCK oc'; exit 0;;
   "create --dry-run=client -o json -f "*)
+    # real_fixture: 2026-10-20 ROSA 실측 oc 4.22.17 출력(JSON 객체 9개 이어 붙임)을 그대로 돌려준다.
+    if [[ "$SCENARIO" == real_fixture ]]; then
+      v=portable; [[ "$args" == */render-fixed.out ]] && v=fixed
+      cat "$FIXTURES/oc-4.22.17-json-$v.out"; exit 0
+    fi
     python3 - "$args" "$SCENARIO" <<'PY'
 import json, sys
 fixed = '/render-fixed.out' in sys.argv[1]
@@ -68,7 +73,19 @@ if scenario != 'one_deployment':
 items += [{'kind': 'Service', 'metadata': {'name': n}} for n in ('fds-engine', 'transaction-api')]
 items += [{'kind': 'NetworkPolicy', 'metadata': {'name': n}}
           for n in ('default-deny-all', 'transaction-api-allow', 'fds-engine-allow')]
-print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}))
+if scenario == 'json_list':
+    # 예전 형식(List 하나)도 계속 받아야 한다.
+    print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}))
+elif scenario == 'json_truncated':
+    out = '\n'.join(json.dumps(i, indent=4) for i in items)
+    print(out[:len(out) // 2])
+elif scenario == 'json_trailing_garbage':
+    print('\n'.join(json.dumps(i, indent=4) for i in items) + '\nnot-json')
+elif scenario == 'json_empty':
+    print('')
+else:
+    # 실제 oc 4.22.17처럼 객체를 이어 붙여 출력한다(List 아님).
+    print('\n'.join(json.dumps(i, indent=4) for i in items))
 PY
     exit 0;;
   "-n fds-app get serviceaccount "*)
@@ -120,7 +137,7 @@ exit 98
 MOCK
 chmod +x "$T/bin/oc"
 
-export PATH="$T/bin:$PATH" CALLLOG="$T/calls.log"
+export PATH="$T/bin:$PATH" CALLLOG="$T/calls.log" FIXTURES="$SOURCE_ROOT/precheck/portability/tests/fixtures"
 DIGEST="$(printf 'a%.0s' {1..64})"
 BASE_ENV=(CTX=mock API=https://api.mock.invalid:6443 NS=fds-app PORT_ENV=ROSA
   EXPECTED_CLUSTER_ID=11111111-2222-3333-4444-555555555555
@@ -172,6 +189,10 @@ check review_rc7 11 yes SCENARIO=review_rc7
 grep -q '^SUMMARY=COLLECTION_ERROR$' "$T/out-review_rc7/admission-result.txt"
 check partial 11 yes SCENARIO=partial
 check one_deployment 11 yes SCENARIO=one_deployment
+# oc -o json 출력 형식: 깨졌거나 비었으면 11(판정하지 않음)
+for s in json_truncated json_trailing_garbage json_empty; do
+  check "$s" 11 yes SCENARIO="$s"
+done
 check sa_403 11 yes SCENARIO=sa_403
 
 # 깨진 응답은 거부·허용으로 읽지 않고 수집 오류(리뷰 B4)
@@ -192,6 +213,13 @@ grep -q 'BROADER_SCC:anyuid' "$T/out-portable_broad/admission-result.txt"
 check fixed_restricted 21 yes SCENARIO=fixed_restricted
 check fixed_broad 21 yes SCENARIO=fixed_broad
 grep -q 'ALLOWED_BY_OTHER_SCC:anyuid' "$T/out-fixed_broad/admission-result.txt"
+
+# 예전 형식(List 하나)과 2026-10-20 ROSA 실측 출력(oc 4.22.17, 객체 9개 이어 붙임) 모두 정상 판정
+for s in json_list real_fixture; do
+  check "$s" 0 yes SCENARIO="$s"
+  grep -q '^SUMMARY=ADMISSION_AS_EXPECTED$' "$T/out-$s/admission-result.txt"
+  [[ "$(grep -c 'scc-subject-review -z' "$CALLLOG")" == 4 ]] || { echo "FAIL $s: review count"; exit 1; }
+done
 
 # 정상: 리뷰 4건(-z 앱 SA), SA/Service/NetworkPolicy는 리뷰하지 않음
 check ok 0 yes SCENARIO=ok

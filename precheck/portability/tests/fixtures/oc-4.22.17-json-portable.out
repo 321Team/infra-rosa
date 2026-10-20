@@ -1,0 +1,386 @@
+{
+    "apiVersion": "v1",
+    "automountServiceAccountToken": false,
+    "kind": "ServiceAccount",
+    "metadata": {
+        "name": "fds-engine-sa",
+        "namespace": "fds-app"
+    }
+}
+{
+    "apiVersion": "v1",
+    "automountServiceAccountToken": false,
+    "kind": "ServiceAccount",
+    "metadata": {
+        "name": "transaction-api-sa",
+        "namespace": "fds-app"
+    }
+}
+{
+    "apiVersion": "v1",
+    "kind": "Service",
+    "metadata": {
+        "labels": {
+            "app": "fds-engine"
+        },
+        "name": "fds-engine",
+        "namespace": "fds-app"
+    },
+    "spec": {
+        "ports": [
+            {
+                "name": "http",
+                "port": 8001,
+                "protocol": "TCP",
+                "targetPort": 8001
+            },
+            {
+                "name": "metrics",
+                "port": 9090,
+                "protocol": "TCP",
+                "targetPort": 9090
+            }
+        ],
+        "selector": {
+            "app": "fds-engine"
+        },
+        "type": "ClusterIP"
+    }
+}
+{
+    "apiVersion": "v1",
+    "kind": "Service",
+    "metadata": {
+        "labels": {
+            "app": "transaction-api"
+        },
+        "name": "transaction-api",
+        "namespace": "fds-app"
+    },
+    "spec": {
+        "ports": [
+            {
+                "name": "http",
+                "port": 80,
+                "protocol": "TCP",
+                "targetPort": 8000
+            },
+            {
+                "name": "metrics",
+                "port": 9091,
+                "protocol": "TCP",
+                "targetPort": 9091
+            }
+        ],
+        "selector": {
+            "app": "transaction-api"
+        },
+        "type": "ClusterIP"
+    }
+}
+{
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {
+        "labels": {
+            "app": "fds-engine"
+        },
+        "name": "fds-engine",
+        "namespace": "fds-app"
+    },
+    "spec": {
+        "replicas": 3,
+        "selector": {
+            "matchLabels": {
+                "app": "fds-engine"
+            }
+        },
+        "template": {
+            "metadata": {
+                "labels": {
+                    "app": "fds-engine"
+                }
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "image": "registry-input-pending.invalid/fds/fds-engine@sha256:8b257adb08b6d381f72b66d3386efea6112a8f072ecfafcbcd463bcd1c3be89d",
+                        "livenessProbe": {
+                            "httpGet": {
+                                "path": "/livez",
+                                "port": 8001
+                            },
+                            "initialDelaySeconds": 10,
+                            "periodSeconds": 20
+                        },
+                        "name": "fds-engine",
+                        "ports": [
+                            {
+                                "containerPort": 8001
+                            },
+                            {
+                                "containerPort": 9090
+                            }
+                        ],
+                        "readinessProbe": {
+                            "httpGet": {
+                                "path": "/readyz",
+                                "port": 8001
+                            },
+                            "initialDelaySeconds": 5,
+                            "periodSeconds": 10
+                        },
+                        "resources": {
+                            "limits": {
+                                "cpu": "500m",
+                                "memory": "512Mi"
+                            },
+                            "requests": {
+                                "cpu": "250m",
+                                "memory": "256Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "privileged": false,
+                            "readOnlyRootFilesystem": true
+                        }
+                    }
+                ],
+                "securityContext": {
+                    "runAsNonRoot": true,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccountName": "fds-engine-sa",
+                "topologySpreadConstraints": [
+                    {
+                        "labelSelector": {
+                            "matchLabels": {
+                                "app": "fds-engine"
+                            }
+                        },
+                        "matchLabelKeys": [
+                            "pod-template-hash"
+                        ],
+                        "maxSkew": 1,
+                        "nodeTaintsPolicy": "Honor",
+                        "topologyKey": "kubernetes.io/hostname",
+                        "whenUnsatisfiable": "DoNotSchedule"
+                    }
+                ]
+            }
+        }
+    }
+}
+{
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {
+        "labels": {
+            "app": "transaction-api"
+        },
+        "name": "transaction-api",
+        "namespace": "fds-app"
+    },
+    "spec": {
+        "replicas": 3,
+        "selector": {
+            "matchLabels": {
+                "app": "transaction-api"
+            }
+        },
+        "template": {
+            "metadata": {
+                "labels": {
+                    "app": "transaction-api"
+                }
+            },
+            "spec": {
+                "automountServiceAccountToken": false,
+                "containers": [
+                    {
+                        "env": [
+                            {
+                                "name": "DATABASE_URL",
+                                "valueFrom": {
+                                    "secretKeyRef": {
+                                        "key": "DATABASE_URL",
+                                        "name": "transaction-api-db-credentials"
+                                    }
+                                }
+                            }
+                        ],
+                        "image": "registry-input-pending.invalid/fds/transaction-api@sha256:338b8a2871507ce8b42deedc916b26e350577ee6efd18df23d7ff2dd4b17dff0",
+                        "livenessProbe": {
+                            "httpGet": {
+                                "path": "/livez",
+                                "port": 8000
+                            },
+                            "initialDelaySeconds": 10,
+                            "periodSeconds": 20
+                        },
+                        "name": "transaction-api",
+                        "ports": [
+                            {
+                                "containerPort": 8000
+                            },
+                            {
+                                "containerPort": 9091
+                            }
+                        ],
+                        "readinessProbe": {
+                            "httpGet": {
+                                "path": "/readyz",
+                                "port": 8000
+                            },
+                            "initialDelaySeconds": 5,
+                            "periodSeconds": 10
+                        },
+                        "resources": {
+                            "limits": {
+                                "cpu": "500m",
+                                "memory": "512Mi"
+                            },
+                            "requests": {
+                                "cpu": "250m",
+                                "memory": "256Mi"
+                            }
+                        },
+                        "securityContext": {
+                            "allowPrivilegeEscalation": false,
+                            "capabilities": {
+                                "drop": [
+                                    "ALL"
+                                ]
+                            },
+                            "privileged": false,
+                            "readOnlyRootFilesystem": true
+                        }
+                    }
+                ],
+                "securityContext": {
+                    "runAsNonRoot": true,
+                    "seccompProfile": {
+                        "type": "RuntimeDefault"
+                    }
+                },
+                "serviceAccountName": "transaction-api-sa",
+                "topologySpreadConstraints": [
+                    {
+                        "labelSelector": {
+                            "matchLabels": {
+                                "app": "transaction-api"
+                            }
+                        },
+                        "matchLabelKeys": [
+                            "pod-template-hash"
+                        ],
+                        "maxSkew": 1,
+                        "nodeTaintsPolicy": "Honor",
+                        "topologyKey": "kubernetes.io/hostname",
+                        "whenUnsatisfiable": "DoNotSchedule"
+                    }
+                ]
+            }
+        }
+    }
+}
+{
+    "apiVersion": "networking.k8s.io/v1",
+    "kind": "NetworkPolicy",
+    "metadata": {
+        "name": "default-deny-all",
+        "namespace": "fds-app"
+    },
+    "spec": {
+        "podSelector": {},
+        "policyTypes": [
+            "Ingress",
+            "Egress"
+        ]
+    }
+}
+{
+    "apiVersion": "networking.k8s.io/v1",
+    "kind": "NetworkPolicy",
+    "metadata": {
+        "name": "fds-engine-allow",
+        "namespace": "fds-app"
+    },
+    "spec": {
+        "ingress": [
+            {
+                "from": [
+                    {
+                        "podSelector": {
+                            "matchLabels": {
+                                "app": "transaction-api"
+                            }
+                        }
+                    }
+                ],
+                "ports": [
+                    {
+                        "port": 8001,
+                        "protocol": "TCP"
+                    }
+                ]
+            }
+        ],
+        "podSelector": {
+            "matchLabels": {
+                "app": "fds-engine"
+            }
+        },
+        "policyTypes": [
+            "Ingress",
+            "Egress"
+        ]
+    }
+}
+{
+    "apiVersion": "networking.k8s.io/v1",
+    "kind": "NetworkPolicy",
+    "metadata": {
+        "name": "transaction-api-allow",
+        "namespace": "fds-app"
+    },
+    "spec": {
+        "egress": [
+            {
+                "ports": [
+                    {
+                        "port": 8001,
+                        "protocol": "TCP"
+                    }
+                ],
+                "to": [
+                    {
+                        "podSelector": {
+                            "matchLabels": {
+                                "app": "fds-engine"
+                            }
+                        }
+                    }
+                ]
+            }
+        ],
+        "podSelector": {
+            "matchLabels": {
+                "app": "transaction-api"
+            }
+        },
+        "policyTypes": [
+            "Ingress",
+            "Egress"
+        ]
+    }
+}
