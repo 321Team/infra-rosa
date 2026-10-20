@@ -86,6 +86,16 @@ class T(unittest.TestCase):
         env = dict(self.env, P3_TARGET_HOST="10.1.93.51")
         self.assertTrue(any("tuple" in e for e in self.run_check(env=env)))
 
+    # PR48 R1: 기준 namespace·선택자를 정책과 독립으로 본다
+    def test_wrong_namespace(self):
+        self.assertTrue(any("metadata.namespace" in e for e in self.mutate(lambda p: p["metadata"].update({"namespace": "rosa-app"}))))
+
+    def test_missing_namespace(self):
+        self.assertTrue(any("metadata.namespace" in e for e in self.mutate(lambda p: p["metadata"].pop("namespace"))))
+
+    def test_part_of_removed_case_only(self):
+        self.assertTrue(any("정확히 같아야" in e for e in self.mutate(lambda p: p["spec"]["podSelector"]["matchLabels"].pop("app.kubernetes.io/part-of"))))
+
     def test_03_already_selects_tool(self):
         o3 = copy.deepcopy(self.o3); o3["spec"]["podSelector"] = {"matchLabels": {"app.kubernetes.io/part-of": "fds-coldpull"}}
         self.assertTrue(any("중복" in e for e in self.run_check(o3=o3)))

@@ -25,22 +25,32 @@
 ```bash
 python3 platform/netpol/window-b/check_window_b_np.py platform/netpol/window-b/20-coldpull-probe-egress.yaml platform/netpol/03-allow-egress-onprem.yaml <coldpull-kit-v5 폴더>
 ```
-- 키트의 실제 `coldpull_tool.podspec()`으로 tool·pull Pod를 만들어 선택자와 대조하고(tool 선택·pull 비선택·#7 03 비선택), 허용 tuple이 키트 `kit.env`(`IMAGE_HOST`·`HARBOR_PORT`·`NEG_HARBOR_PORTS`·`P3_TARGET_*`)와 **정확히 같은지** 봅니다. Egress만, /32 ipBlock·TCP 단일 포트만 허용합니다.
-- 2026-10-19 결과: 키트 v5(`SHA256SUMS` `73be95ab…`, `coldpull_tool.py` `477a2228…`, `kit.env` `75cb1fe9…`)로 **PASS**. 반례 시험 15/15 OK(`python3 platform/netpol/window-b/tests/test_check_window_b_np.py`).
+- namespace는 `fds-app`, 선택자는 승인된 tool 라벨 두 개와 **정확히 같아야** 합니다(기준값은 검사 대상 정책에서 가져오지 않음).
+- 키트의 실제 `coldpull_tool.podspec()`으로 `fds-app`의 tool·pull Pod를 만들어 선택자와 대조하고(tool 선택·pull 비선택·#7 03 비선택), 허용 tuple이 키트 `kit.env`(`IMAGE_HOST`·`HARBOR_PORT`·`NEG_HARBOR_PORTS`·`P3_TARGET_*`)와 **정확히 같은지** 봅니다. Egress만, /32 ipBlock·TCP 단일 포트만 허용합니다.
+- 2026-10-20 결과: 키트 v5(`SHA256SUMS` `73be95ab…`, `coldpull_tool.py` `477a2228…`, `kit.env` `75cb1fe9…`)로 **PASS**. 반례 시험 18/18 OK(`python3 platform/netpol/window-b/tests/test_check_window_b_np.py`, namespace 틀림·없음·`part-of` 삭제 3건 추가).
 - 이 검사는 CNI 실제 효과 시험이 아닙니다. 실제 효과는 창 B의 P0·P1·P2·P3 결과와 Relay·vpn-gw01·Harbor guard 카운터로 봅니다.
 
 ## 3. 창 B 안 절차 (카드 ④-P·⑨, 별도 GO 뒤)
 
-**만들기(④-P, P0 전):**
-1. 기존 정책 목록 읽기: `oc -n fds-app get networkpolicy -o name` 원문 기록. 같은 이름이 있으면 **만들지 않고 HOLD**. 같은 정확 허용(선택자·tuple 4개)이 이미 live에 있으면 그것을 재사용하고 새로 만들지 않습니다(UID 기록).
-2. 만들기: `oc create -f platform/netpol/window-b/20-coldpull-probe-egress.yaml -o jsonpath='{.metadata.uid}'` → **UID 기록**(`apply`가 아니라 `create`: 기존 객체를 덮어쓰지 않음)
-3. readback: `oc -n fds-app get networkpolicy coldpull-probe-egress-window-b -o yaml` 원본 보존, 정책 목록을 1번과 대조(이 정책 1개만 늘어야 함)
+**공통 사전 읽기(④-P, P0 전):**
+1. `oc -n fds-app get networkpolicy -o yaml` 원문 보존, 이름·UID·`spec` SHA-256 목록 기록. NetworkPolicy는 허용이 합집합이므로 기존 정책 원문도 함께 대조합니다([Kubernetes 문서](https://kubernetes.io/docs/concepts/services-networking/network-policies/#the-two-sorts-of-pod-isolation)).
+2. 아래 중 **하나로만** 갑니다. 기록 칸 `CREATED_THIS_WINDOW`로 구분합니다.
+   - 이름 `coldpull-probe-egress-window-b`가 이미 있음 → **만들지 않고 HOLD**(재사용으로 넘기지 않음)
+   - 다른 이름의 **같은 정확 허용**(선택자 두 라벨·tuple 4개·Egress만)이 이미 있음 → **경우 A(재사용)**
+   - 둘 다 아님 → **경우 B(새로 만들기)**
+   - 예상 밖 정책·조회 오류 → HOLD
 
-**지우기(⑨, 창 끝):**
-4. `oc -n fds-app get networkpolicy coldpull-probe-egress-window-b -o jsonpath='{.metadata.uid}'`가 2번 UID와 같을 때만 `oc -n fds-app delete networkpolicy coldpull-probe-egress-window-b --wait=true`
-5. readback: 같은 이름 NotFound, 정책 목록이 1번과 같음(플랫폼 00~03 그대로)
+**경우 A — 기존 동등 정책 재사용 (`CREATED_THIS_WINDOW=false`)**
+- 기록: 그 정책의 이름·UID·`spec` SHA-256·원문, `CREATED_THIS_WINDOW=false`
+- 이 창에서 만들지도 지우지도 않습니다.
+- 창 끝(⑨): 같은 이름·UID·`spec` SHA-256이 그대로인지, 정책 목록이 1번과 같은지(늘거나 줄지 않음) readback만 합니다. 달라졌으면 HOLD·보고(되돌리지 않음).
 
-**멈추는 조건:** 1번에 예상 밖 정책, 3번 목록 불일치, 4번 UID 불일치·조회 오류 → 지우지 않고 HOLD·보고. 자동 재시도·다른 정책 삭제·디렉터리 일괄 delete 없음.
+**경우 B — 새로 만들기 (`CREATED_THIS_WINDOW=true`)**
+- 만들기: `oc create -f platform/netpol/window-b/20-coldpull-probe-egress.yaml -o jsonpath='{.metadata.uid}'` → 성공한 경우에만 **생성 UID**와 `CREATED_THIS_WINDOW=true` 기록(`apply`가 아니라 `create`: 기존 객체를 덮어쓰지 않음). 생성이 실패하면 UID 없음·`CREATED_THIS_WINDOW=false`로 기록하고 HOLD
+- readback: `oc -n fds-app get networkpolicy coldpull-probe-egress-window-b -o yaml` 원본 보존, 정책 목록이 1번 대비 **이 정책 1개만 늘었는지** 대조
+- 창 끝(⑨): `oc -n fds-app get networkpolicy coldpull-probe-egress-window-b -o jsonpath='{.metadata.uid}'`가 **생성 UID와 같을 때만** `oc -n fds-app delete networkpolicy coldpull-probe-egress-window-b --wait=true` → 같은 이름 NotFound, 정책 목록이 1번과 같음(플랫폼 00~03 그대로)
+
+**멈추는 조건:** 예상 밖 정책, 목록 불일치, UID 불일치·조회 오류 → 지우지 않고 HOLD·보고. `CREATED_THIS_WINDOW=false`인 정책은 어떤 경우에도 지우지 않습니다. 자동 재시도·다른 정책 삭제·디렉터리 일괄 delete 없음.
 
 💰 이 정책은 과금 자원을 만들지 않습니다.
 
