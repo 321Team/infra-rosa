@@ -1,0 +1,40 @@
+# infra-rosa#7 — 창 B(cold-pull, infra-rosa#12) 전용 tool Pod Egress 허용. 창 B 동안만 두고 끝나면 이 정책만 삭제한다.
+# 근거: infra-rosa#12 권욱 검토 6263431388 B2(초안 원문), 창 B 카드 v2 6263634565 P7·④-P.
+# 왜 필요한가: cold-pull 키트 v5 tool Pod 라벨(app.kubernetes.io/part-of=fds-coldpull, fds-coldpull-case=tool)은
+#   #7 03(onprem-egress=true)에 선택되지 않는다. 플랫폼 00(default deny)이 있으면 P1·T1·T2가 Pod 단계에서 막히고,
+#   .54:443만 열면 음성 P2-22·P2-80·P3도 Pod 단계에서 막혀 SG·Relay nft 차단 귀속을 볼 수 없다.
+# 그래서 시험 tuple 4개만 Pod 단계를 통과시킨다. SG·Relay·Harbor 허용을 넓히는 정책이 아니다.
+# 선택자: run 라벨(fds-coldpull-run)은 61 실행마다 바뀌어(before/after가 다름) 쓰지 않는다. case=tool이 아닌
+#   pull Pod는 선택하지 않는다(이미지 pull은 node CRI-O 경로라 Pod NetworkPolicy와 무관).
+# DNS: 키트 v5는 IP(https://10.1.93.54/v2/)로 접속하므로 넣지 않는다. 플랫폼 01이 있으면 그대로 적용된다.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: coldpull-probe-egress-window-b
+  namespace: fds-app
+  labels:
+    project: fds-hybrid
+    team: 321team
+    purpose: coldpull-probe-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: fds-coldpull
+      fds-coldpull-case: tool
+  policyTypes:
+    - Egress
+  egress:
+    # harbor01: P0·P1·T1·T2(443), 음성 P2-22·P2-80
+    - to:
+        - ipBlock:
+            cidr: 10.1.93.54/32
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 22 }
+        - { protocol: TCP, port: 80 }
+    # edge01: 음성 P3(443). 예상 밖 CONNECTED면 키트 기존 STOP
+    - to:
+        - ipBlock:
+            cidr: 10.1.93.50/32
+      ports:
+        - { protocol: TCP, port: 443 }
