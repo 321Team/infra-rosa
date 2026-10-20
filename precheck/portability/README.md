@@ -192,7 +192,7 @@ PG-03 Runtime은 [current private architecture candidate](https://github.com/321
   - 마지막 namespace 확인 3건(PR39 R3와 같은 보완): 판정이 정상이어도 종료 시 namespace 조회가 다른 UID·빈 출력 실패·UID 출력 후 실패이면 RC10이고 SHA256SUMS로 마감하지 않는지 확인합니다
   - oc `-o json` 출력 형식 5건(2026-10-20 ROSA 실행 RC11 원인 보완): 실제 `oc` 4.22.17은 렌더 객체를 List가 아니라 **JSON 객체를 이어 붙여** 출력합니다. 수집기는 둘 다 읽습니다. 예전 List 형식 정상, **실측 원본 그대로**(`tests/fixtures/oc-4.22.17-json-*.out`) 정상, 잘린 출력·뒤에 쓰레기·빈 출력은 11
   - 모든 경우 쓰기 명령 0건을 확인합니다.
-- 상태: oc JSON 이어 붙임 형식 보완 HEAD의 MOCK 45건은 **NOT RUN**(Linux 실행 후 기록). 이전 기록: `b7a9186` MOCK 40건 PASS, `5585754` 37건 PASS([evidence #204](https://github.com/321Team/fds-project-evidence/pull/204)). ROSA 실제 실행 1회: 2026-10-20 RC11 STOP(수집기 JSON 파싱, review POST 0) — [#6 결과 6280562644](https://github.com/321Team/infra-rosa/issues/6#issuecomment-6280562644). PG03=HOLD.
+- 상태: oc JSON 이어 붙임 형식 보완 후 MOCK 45건 PASS — `8d42515`, 2026-10-20 KST, 개인 AWS CloudShell(`env -i` 격리, 같은 회차 관측기 MOCK 51·input-contract PASS), 묶음 `pg03-json-8d42515.tgz` SHA-256 `76bad2c8350d338b3f020ae144ad6cbb859012b42406aa5ab7385b7d146c3a62`(CloudShell 보관). 이전 기록: `b7a9186` MOCK 40건 PASS, `5585754` 37건 PASS([evidence #204](https://github.com/321Team/fds-project-evidence/pull/204)). ROSA 실제 실행 1회: 2026-10-20 RC11 STOP(수집기 JSON 파싱, review POST 0) — [#6 결과 6280562644](https://github.com/321Team/infra-rosa/issues/6#issuecomment-6280562644). PG03=HOLD.
 
 ## 생성 직후 실행 안내
 
