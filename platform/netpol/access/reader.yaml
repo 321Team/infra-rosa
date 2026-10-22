@@ -1,0 +1,34 @@
+# infra-rosa#7 — netpol-run.sh가 쓰는 클러스터 범위 읽기 4종만 담은 창 한정 권한 (#7 6286217735 안 A)
+# 창 시작 때 붙이고 창 끝(P8·P9 전)에 뗀다. 붙이기·떼기는 #5 래퍼(bootstrap-session.sh) + steps-reader.sh.
+# 쓰기·Secret·RBAC 권한 없음. fds-app 안 작업은 기존 hayeoung-admin RoleBinding으로 한다.
+#   nodes get/list        → precheck C1(Worker IP), 결속 확인(get node)
+#   namespaces get/list   → precheck C4(get namespace -l policy-group…ingress)
+#   pods get/list         → precheck C5(-n openshift-dns get pods), 결속(get pods -A --field-selector spec.nodeName)
+#   networks/cluster get  → precheck C3(network.config networkType)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fds-netpol-window-reader
+  labels: {team: 321team, project: fds-hybrid, purpose: netpol-window}
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  - apiGroups: [config.openshift.io]
+    resources: [networks]
+    resourceNames: [cluster]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fds-netpol-window-reader-hayeoung
+  labels: {team: 321team, project: fds-hybrid, purpose: netpol-window}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fds-netpol-window-reader}
+subjects: [{apiGroup: rbac.authorization.k8s.io, kind: User, name: hayeoung}]
