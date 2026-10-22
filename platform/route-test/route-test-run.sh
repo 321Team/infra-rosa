@@ -29,7 +29,11 @@
 #   11 조회 오류   20 precheck 조건 불충족(관리자 권한·권한 부족·예상 밖 객체·02 정책 불일치·dry-run 실패)
 #   21 bundle 불일치   30 단계 순서·조건 위반(이전 단계 없음·이미 실행·목록 변화·REF 없음)
 #   41 생성·Ready 실패(정리는 수행·결과 기록)   50 R-1~R-4 중 FAIL(정리는 수행·결과 기록)
-#   60 정리 HOLD(UID 불일치·미확인·조회 오류·삭제 실패·목록 불일치·정책 변화) — 같은 RUN에서 cleanup 재시도
+#   60 정리 HOLD(UID 불일치·UID precondition 409·미확인·조회 오류·삭제 실패·목록 불일치·정책 변화) — 같은 RUN cleanup 재시도
+#
+# PR50 리뷰(권욱) 반영: R1 DELETE에 UID precondition, R2 명령별 바깥 실행 상한(rc 124/137 기록),
+#   R3 custom-host는 --subresource로 권한 질의, R4 run·cleanup은 precheck와 같은 사용자만
+#   (cleanup은 RECOVERY_USER·RECOVERY_REF로 명시한 복구 인수 주체만 예외).
 set -euo pipefail
 umask 077
 
@@ -50,6 +54,9 @@ RUN_DIR="${RUN_DIR:-}"
 EXEC_TIMEOUT_S="${ROUTE_EXEC_TIMEOUT_S:-60}"
 [[ "$EXEC_TIMEOUT_S" =~ ^[0-9]+$ ]] && (( EXEC_TIMEOUT_S >= 1 && EXEC_TIMEOUT_S <= 300 )) || die 2 "ROUTE_EXEC_TIMEOUT_S 1~300"
 POLL_S="${ROUTE_POLL_S:-10}"
+CERT_TIMEOUT_S="${ROUTE_CERT_TIMEOUT_S:-15}"
+[[ "$CERT_TIMEOUT_S" =~ ^[0-9]+$ ]] && (( CERT_TIMEOUT_S >= 1 && CERT_TIMEOUT_S <= 60 )) || die 2 "ROUTE_CERT_TIMEOUT_S 1~60"
+left() { local l=$(( $1 - $(date +%s) )); (( l >= 1 )) && echo "$l" || echo 1; }   # deadline까지 남은 초(최소 1)
 [[ "$POLL_S" =~ ^[0-9]+$ ]] && (( POLL_S <= 60 )) || die 2 "ROUTE_POLL_S 0~60"
 
 UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
@@ -94,16 +101,19 @@ open_phase() {
   journal START "$(basename "$PD")"
 }
 
+# 모든 명령에 바깥 실행 상한을 건다(PR50 R2). RUN_LIMIT(초)를 호출 앞에 주면 그 값, 없으면 EXEC_TIMEOUT_S+15.
+# 상한 초과는 rc 124(TERM) / 137(KILL, TERM 뒤 5초)로 기록된다. oc --request-timeout은 oc 요청에만 적용된다.
 run() {
   local name="$1"; shift
-  local start rc; start="$(now_utc)"
+  local start rc lim="${RUN_LIMIT:-$(( EXEC_TIMEOUT_S + 15 ))}"; start="$(now_utc)"
+  (( lim >= 1 )) || lim=1
   set +e
-  "$@" >"$PD/$name.out" 2>"$PD/$name.err"
+  timeout --signal=TERM --kill-after=5s "${lim}s" "$@" >"$PD/$name.out" 2>"$PD/$name.err"
   rc=$?
   set -e
   echo "$rc" >"$PD/$name.rc"
   # 토큰·kubeconfig 내용은 argv에 넣지 않는다(context 이름·URL·자원 이름만).
-  printf '%s\t%s\t%s\t%s\t%s\n' "$start" "$(now_utc)" "$rc" "$name" "$(printf '%q ' "$@")" >>"$PD/commands.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$start" "$(now_utc)" "$rc" "$name" "limit=${lim}s" "$(printf '%q ' "$@")" >>"$PD/commands.tsv"
   return 0
 }
 rc_of() { cat "$PD/$1.rc"; }
@@ -225,6 +235,17 @@ run ns-uid "${OC[@]}" get project "$NS" -o 'jsonpath={.metadata.uid}'
 [[ "$(rc_of ns-uid)" == 0 && "$(out_of ns-uid)" == "$EXPECTED_NS_UID" ]] || die 10 "Namespace(project) UID가 승인 inventory와 다르거나 조회 불가"
 run whoami "${OC[@]}" whoami
 [[ "$(rc_of whoami)" == 0 && -n "$(out_of whoami)" ]] || die 11 "whoami 조회 오류"
+# precheck에서 확인한 일반 사용자와 같은 인증 주체만 생성·삭제한다(PR50 R4). 첫 변경 전에 확인.
+if [[ "$PHASE" != precheck ]]; then
+  if [[ "$(out_of whoami)" != "$(kv "$RUN_DIR/target.env" USER)" ]]; then
+    # cleanup만, 명시된 복구 인수 주체(RECOVERY_USER = 현재 사용자, RECOVERY_REF = 인수 기록 댓글 URL)를 허용한다.
+    if [[ "$PHASE" == cleanup && -n "${RECOVERY_USER:-}" && "${RECOVERY_USER}" == "$(out_of whoami)" && "${RECOVERY_REF:-}" =~ $REF_RE ]]; then
+      printf 'RECOVERY_USER=%s\nRECOVERY_REF=%s\n' "$RECOVERY_USER" "$RECOVERY_REF" >"$PD/recovery-actor.txt"
+    else
+      die 10 "현재 사용자($(out_of whoami))가 precheck 사용자($(kv "$RUN_DIR/target.env" USER))와 다름 — 변경 전 중단"
+    fi
+  fi
+fi
 run oc-client oc version --client
 {
   echo "ENV=ROSA"; echo "PHASE=$PHASE"; echo "KST=$(now_kst)"; echo "CTX=$CTX"; echo "API=$API"
@@ -256,11 +277,14 @@ if [[ "$PHASE" == precheck ]]; then
   # 본인 일반 계정: 클러스터 관리자 권한으로 실행하지 않는다.
   run cani-admin "${OC[@]}" auth can-i '*' '*' --all-namespaces
   [[ "$(out_of cani-admin)" == no ]] || STOPS+=("클러스터 관리자 권한 계정(can-i * * = $(out_of cani-admin)) — 본인 일반 계정으로 실행")
-  for res in pods services routes routes/custom-host; do
-    k="cani-${res//\//-}"
+  for res in pods services routes; do
+    k="cani-$res"
     run "$k" "${OC[@]}" -n "$NS" auth can-i create "$res"
     [[ "$(out_of "$k")" == yes ]] || STOPS+=("$res create 권한 없음")
   done
+  # routes/custom-host는 subresource로 묻는다(TYPE/NAME 형식은 이름 조회로 해석됨 — PR50 R3).
+  run cani-routes-custom-host "${OC[@]}" -n "$NS" auth can-i create routes.route.openshift.io --subresource=custom-host
+  [[ "$(rc_of cani-routes-custom-host)" == 0 && "$(out_of cani-routes-custom-host)" == yes ]] || STOPS+=("routes/custom-host create 권한 없음")
   for res in pods services routes; do
     k="cani-del-$res"
     run "$k" "${OC[@]}" -n "$NS" auth can-i delete "$res"
@@ -291,7 +315,7 @@ fi
 # ======================================================================
 # 정리: run이 OWNED로 기록한 자원만 UID 대조 후 삭제 → NotFound → 목록·정책 복원 확인. 소유 미확정은 지우지 않는다.
 do_cleanup() { # sets CLEAN_RESULT=DONE|HOLD
-  local r uid status note k i gone
+  local r uid status note k i gone uri
   local HOLD=()
   : >"$PD/cleanup.txt"
   while IFS=$'\t' read -r r uid status note; do
@@ -304,15 +328,33 @@ do_cleanup() { # sets CLEAN_RESULT=DONE|HOLD
       continue
     fi
     if [[ "$(out_of "cur-$k")" != "$uid" ]]; then HOLD+=("$r:UID 불일치"); echo "$r HOLD(UID 불일치 $(out_of "cur-$k") — 이름만 같은 객체, 지우지 않음)" >>"$PD/cleanup.txt"; continue; fi
-    run "del-$k" "${OC[@]}" -n "$NS" delete "$r" --wait=true --timeout=120s
-    if [[ "$(rc_of "del-$k")" != 0 ]]; then HOLD+=("$r:삭제 실패"); echo "$r HOLD(삭제 실패)" >>"$PD/cleanup.txt"; continue; fi
+    # 조회와 삭제 사이에 같은 이름으로 재생성된 객체를 지우지 않도록, 서버 DELETE에 기록 UID를 precondition으로 건다
+    # (PR50 R1). UID가 다르면 서버가 409로 거부한다 → HOLD.
+    case "$r" in
+      pod/*) uri="/api/v1/namespaces/$NS/pods/${r#*/}" ;;
+      service/*) uri="/api/v1/namespaces/$NS/services/${r#*/}" ;;
+      route/*) uri="/apis/route.openshift.io/v1/namespaces/$NS/routes/${r#*/}" ;;
+      *) HOLD+=("$r:알 수 없는 종류"); echo "$r HOLD(알 수 없는 종류)" >>"$PD/cleanup.txt"; continue ;;
+    esac
+    printf '{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"%s"}}\n' "$uid" >"$PD/delete-options-$k.json"
+    RUN_LIMIT=60 run "del-$k" "${OC[@]}" delete --raw="$uri" -f "$PD/delete-options-$k.json"
+    if [[ "$(rc_of "del-$k")" != 0 ]]; then
+      if grep -qiE 'Conflict|Precondition failed|409' "$PD/del-$k.err"; then HOLD+=("$r:UID precondition 거부(409)"); echo "$r HOLD(UID precondition 거부 — 다른 UID 객체, 지우지 않음)" >>"$PD/cleanup.txt"
+      else HOLD+=("$r:삭제 실패"); echo "$r HOLD(삭제 실패 rc=$(rc_of "del-$k"))" >>"$PD/cleanup.txt"; fi
+      continue
+    fi
     gone=no
-    for i in 1 2 3; do
-      run "gone-$k-$i" "${OC[@]}" -n "$NS" get "$r" -o name
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do   # pod 종료 대기 포함(최대 약 12 × POLL_S)
+      run "gone-$k-$i" "${OC[@]}" -n "$NS" get "$r" -o 'jsonpath={.metadata.uid}'
       if [[ "$(rc_of "gone-$k-$i")" != 0 ]] && grep -q NotFound "$PD/gone-$k-$i.err"; then gone=yes; break; fi
+      if [[ "$(rc_of "gone-$k-$i")" == 0 && "$(out_of "gone-$k-$i")" != "$uid" ]]; then gone=other; break; fi
       sleep "$POLL_S"
     done
-    if [[ $gone == yes ]]; then echo "$r DELETED $uid NotFound" >>"$PD/cleanup.txt"; else HOLD+=("$r:삭제 후 NotFound 확인 안 됨"); echo "$r HOLD(NotFound 미확인)" >>"$PD/cleanup.txt"; fi
+    case $gone in
+      yes) echo "$r DELETED $uid NotFound" >>"$PD/cleanup.txt" ;;
+      other) HOLD+=("$r:같은 이름의 다른 UID 객체 존재"); echo "$r HOLD(기록 UID는 사라졌으나 같은 이름의 다른 UID $(out_of "gone-$k-$i") 존재 — 지우지 않음)" >>"$PD/cleanup.txt" ;;
+      *) HOLD+=("$r:삭제 후 NotFound 확인 안 됨"); echo "$r HOLD(NotFound 미확인)" >>"$PD/cleanup.txt" ;;
+    esac
   done <"$RUN_DIR/run/created.tsv"
   if inventory inv-after; then
     if [[ "$(sha_of "$PD/inv-after.sorted")" == "$(kv "$RUN_DIR/target.env" INV_BEFORE_SHA256)" ]]; then echo "INVENTORY RESTORED" >>"$PD/cleanup.txt"
@@ -379,7 +421,7 @@ if [[ "$(rc_of create)" != 0 || "$(grep -c $'\tOWNED\t' "$CREATED")" != 3 ]]; th
 else
   res CREATE PASS "OWNED 3/3"
   # 2) image pull·Ready
-  run ready "${OC[@]}" -n "$NS" wait --for=condition=Ready pod/route-host-probe --timeout="${READY_TIMEOUT_S}s"
+  RUN_LIMIT=$(( READY_TIMEOUT_S + 30 )) run ready "${OC[@]}" -n "$NS" wait --for=condition=Ready pod/route-host-probe --timeout="${READY_TIMEOUT_S}s"
   run pod-image "${OC[@]}" -n "$NS" get pod route-host-probe -o 'jsonpath={.status.containerStatuses[0].imageID}{"\t"}{.spec.nodeName}'
   if [[ "$(rc_of ready)" != 0 ]]; then res READY FAIL "wait rc=$(rc_of ready)"; TESTS=no; FINAL_RC=41
   elif [[ "$(cut -f1 "$PD/pod-image.out")" != *"@${HTTP_IMAGE#*@}" ]]; then res READY FAIL "imageID가 승인 digest와 다름: $(cut -f1 "$PD/pod-image.out")"; TESTS=no; FINAL_RC=41
@@ -408,8 +450,8 @@ if [[ $TESTS == yes ]]; then
     deadline=$(( $(date +%s) + DNS_TIMEOUT_S )); i=0
     while :; do
       i=$((i+1))
-      run "r2-host-$i" getent ahostsv4 "$ROUTE_HOST"
-      run "r2-canon-$i" getent ahostsv4 "$canon"
+      RUN_LIMIT="$(left "$deadline")" run "r2-host-$i" getent ahostsv4 "$ROUTE_HOST"
+      RUN_LIMIT="$(left "$deadline")" run "r2-canon-$i" getent ahostsv4 "$canon"
       hs="$(awk '{print $1}' "$PD/r2-host-$i.out" | sort -u | tr '\n' ' ')"; cs="$(awk '{print $1}' "$PD/r2-canon-$i.out" | sort -u | tr '\n' ' ')"
       [[ -n "$hs" && "$hs" == "$cs" ]] && break
       (( $(date +%s) >= deadline )) && break
@@ -424,10 +466,10 @@ if [[ $TESTS == yes ]]; then
   deadline=$(( $(date +%s) + HTTP_TIMEOUT_S )); i=0
   while :; do
     i=$((i+1))
-    run "r3-$i" curl -sS --proto =https -o "$PD/r3-$i.body" -D "$PD/r3-$i.hdr" -w '%{http_code} %{ssl_verify_result}' --max-time 15 "https://$ROUTE_HOST/"
+    RUN_LIMIT=20 run "r3-$i" curl -sS --proto =https -o "$PD/r3-$i.body" -D "$PD/r3-$i.hdr" -w '%{http_code} %{ssl_verify_result}' --max-time 15 "https://$ROUTE_HOST/"
     read -r code3 verify3 <"$PD/r3-$i.out" || true
     [[ "$(rc_of "r3-$i")" == 0 && "${code3:-}" != 503 ]] && break
-    [[ "$(rc_of "r3-$i")" != 0 && "$(rc_of "r3-$i")" != 7 && "$(rc_of "r3-$i")" != 28 ]] && break   # TLS·검증 오류(예: 60)는 즉시 판정
+    [[ "$(rc_of "r3-$i")" != 0 && "$(rc_of "r3-$i")" != 7 && "$(rc_of "r3-$i")" != 28 && "$(rc_of "r3-$i")" != 124 ]] && break   # TLS·검증 오류(예: 60)는 즉시 판정
     (( $(date +%s) >= deadline )) && break
     sleep "$POLL_S"
   done
@@ -437,10 +479,10 @@ if [[ $TESTS == yes ]]; then
     res R-3 FAIL "curl rc=$(rc_of "r3-$i") code=${code3:-none} ssl_verify_result=${verify3:-none} 기대=$EXPECT_HTTPS_CODE"; FINAL_RC=50
   fi
   if command -v openssl >/dev/null; then
-    run r3-cert bash -c 'openssl s_client -connect "$1:443" -servername "$1" </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -enddate -ext subjectAltName' _ "$ROUTE_HOST"
+    RUN_LIMIT="$CERT_TIMEOUT_S" run r3-cert bash -c 'openssl s_client -connect "$1:443" -servername "$1" </dev/null 2>/dev/null | openssl x509 -noout -subject -issuer -enddate -ext subjectAltName' _ "$ROUTE_HOST"
   fi
   # R-4 HTTP → HTTPS: 따라가지 않고 code·Location 정확 비교
-  run r4 curl -sS --proto =http -o /dev/null -D "$PD/r4.hdr" -w '%{http_code}' --max-time 15 "http://$ROUTE_HOST/"
+  RUN_LIMIT=20 run r4 curl -sS --proto =http -o /dev/null -D "$PD/r4.hdr" -w '%{http_code}' --max-time 15 "http://$ROUTE_HOST/"
   loc="$(awk 'tolower($1)=="location:" {sub(/\r$/, "", $2); print $2}' "$PD/r4.hdr" | tail -n 1)"
   if [[ "$(rc_of r4)" == 0 && "$(out_of r4)" == "$EXPECT_HTTP_CODE" && "$loc" == "https://$ROUTE_HOST/" ]]; then
     res R-4 PASS "http $(out_of r4) Location=$loc"

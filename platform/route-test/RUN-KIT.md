@@ -62,6 +62,8 @@ RUN_DIR=$RUN_DIR APPROVED_BUNDLE_SHA256=<BUNDLE_SHA256> GO_REF=<GO 기록 URL> S
 
 # 4) (run이 60 = 정리 HOLD로 끝났을 때만) 원인 확인 뒤 같은 RUN으로 정리 재시도
 RUN_DIR=$RUN_DIR APPROVED_BUNDLE_SHA256=<BUNDLE_SHA256> bash $K/route-test-run.sh cleanup
+#    precheck와 다른 사용자가 정리를 인수할 때만(기록 댓글 필요):
+#    RECOVERY_USER=<그 사용자 whoami> RECOVERY_REF=<인수 기록 URL> 를 함께 준다. 그 밖의 사용자 전환은 변경 전 중단(10)
 ```
 
 - `TEAM=321team`은 `fds-app` namespace 라벨·#7 render 입력과 같은 값입니다.
@@ -75,7 +77,10 @@ RUN_DIR=$RUN_DIR APPROVED_BUNDLE_SHA256=<BUNDLE_SHA256> bash $K/route-test-run.s
 | precheck 뒤 목록·정책 변화, REF 없음, 재실행 | 생성 전 중단 | 30 |
 | 생성 일부 실패·Ready 실패(pull 포함)·imageID가 승인 digest와 다름 | 진단 원본 보존 → **OWNED만 정리** → 결과 기록 | 41 |
 | R-1~R-4 중 FAIL | 진단 원본 보존(`diag-*`) → **OWNED만 정리** → 결과 기록 | 50 |
-| 정리 HOLD: UID 불일치(이름만 같은 객체), 소유 미확정(UNCONFIRMED), 조회·삭제 오류, NotFound 미확인, 목록 불일치, 정책 변화 | 그 객체는 **지우지 않고** 담당자 인계, 같은 RUN으로 `cleanup` 재시도. **앱 배포 금지** | 60 |
+| precheck 뒤 실행 사용자 변경(`whoami` ≠ target.env `USER`) | 첫 변경 전 중단. cleanup은 `RECOVERY_USER`·`RECOVERY_REF`로 명시한 인수 주체만 예외 | 10 |
+| 정리 HOLD: UID 불일치(이름만 같은 객체), **DELETE UID precondition 거부(409)**, 같은 이름의 다른 UID 객체 존재, 소유 미확정(UNCONFIRMED), 조회·삭제 오류, NotFound 미확인, 목록 불일치, 정책 변화 | 그 객체는 **지우지 않고** 담당자 인계, 같은 RUN으로 `cleanup` 재시도. **앱 배포 금지** | 60 |
+| DNS·인증서·HTTP 명령 무응답 | 명령별 바깥 상한(`timeout`)에서 끊고 rc 124/137 기록 → 해당 R FAIL → 진단·OWNED 정리로 진행 | 50 |
+| 생성 요청 자체가 상한 초과 | 생성 결과를 확정하지 못한 객체는 UNCONFIRMED → 자동 재생성·추정 삭제 없이 HOLD·인계 | 41/60 |
 | 전부 PASS | 정리 완료 | 0 |
 
 - 같은 GO로 `run`을 자동 재시도하지 않습니다. `run`·`precheck`는 RUN당 1회이고, 다시 하려면 새 RUN·새 GO가 필요합니다.
@@ -91,7 +96,7 @@ RUN_DIR=$RUN_DIR APPROVED_BUNDLE_SHA256=<BUNDLE_SHA256> bash $K/route-test-run.s
 | R-2 DNS (wildcard 해석 대기 포함) | 최대 5분 | `DNS_TIMEOUT_S=300` |
 | R-3·R-4 HTTPS/HTTP (backend 503 대기 포함) | 최대 3분 | `HTTP_TIMEOUT_S=180` |
 | 실패 진단(describe·endpoints·events) | 5분 | — |
-| R-5 정리·NotFound·목록/정책 readback | 5분 | 삭제 대기 120s |
+| R-5 정리·NotFound·목록/정책 readback | 5분 | 삭제 요청 60s + NotFound 확인 최대 12회 × 10s |
 | 증적 봉인·반출·공유 재해시 | 15분 | — |
 | 보고(#38 8행·#4) | 15분 | — |
 | **합계** | **약 70분 → 작업창 90분 권장** | |
@@ -105,6 +110,19 @@ RUN_DIR=$RUN_DIR APPROVED_BUNDLE_SHA256=<BUNDLE_SHA256> bash $K/route-test-run.s
 - 단계별 `commands.tsv`(UTC·rc·명령), `*.out/.err/.rc`, `context.txt`(API·Cluster ID 확인 결과·NS UID·본인 계정)
 - `run/created.tsv`(OWNED UID), `run/results.tsv`·`run/result.txt`, `run/cleanup.txt`
 
+### 정리 삭제는 UID에 결속 (PR50 R1)
+`get`으로 UID를 대조한 뒤 이름으로 지우면, 그 사이 같은 이름으로 다시 만들어진 다른 객체를 지울 수 있습니다. 그래서 삭제는 API DELETE에 `DeleteOptions.preconditions.uid`(created.tsv의 기록 UID)를 넣어 보냅니다(`oc delete --raw=<uri> -f delete-options-*.json`). UID가 다르면 서버가 409로 거부하고 HOLD합니다. 삭제 뒤에는 같은 이름 조회가 NotFound일 때만 완료로 봅니다. 같은 이름의 다른 UID 객체가 보이면 HOLD입니다.
+
+### 명령별 실행 상한 (PR50 R2)
+모든 명령은 `timeout --signal=TERM --kill-after=5s`로 감쌉니다. 기본값은 `ROUTE_EXEC_TIMEOUT_S`+15초이고, 단계별로 다른 값을 씁니다.
+- Ready: `READY_TIMEOUT_S`+30
+- DNS: deadline까지 남은 시간
+- curl: 20초
+- 인증서 조회: `ROUTE_CERT_TIMEOUT_S`=15
+- 삭제: 60초
+
+`commands.tsv`에 명령별 `limit=`과 rc를 남깁니다.
+
 ## 8. 시험 (MOCK)
 ```bash
 bash platform/route-test/tests/route-test-mock.sh
@@ -114,4 +132,8 @@ bash platform/route-test/tests/route-test-mock.sh
 - 02 정책 결속과 정상 경로
 - R-1~R-4 각 실패 분기에서의 진단·OWNED 정리
 - 이름만 같은 객체(UID 불일치) 보존
+- PR50 R1: GET 뒤 UID 교체 → DELETE precondition 409·비삭제·HOLD, 정상 UID는 삭제·NotFound
+- PR50 R2: `getent`·`openssl` 무응답 → 상한 안 종료(rc 124/137 기록)·정리 진입
+- PR50 R3: routes create=yes·custom-host subresource=no 분리 → precheck 20·쓰기 0(`--subresource` 형식)
+- PR50 R4: precheck 뒤 사용자 변경 → run 10·쓰기 0, cleanup은 명시된 인수 주체만
 - 목록 변화 중단과 정리 재시도

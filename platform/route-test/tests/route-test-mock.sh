@@ -35,9 +35,12 @@ case "$a" in
     [[ "$SCENARIO" == cid_mismatch ]] && { printf '99999999-0000-0000-0000-000000000000'; exit 0; }
     printf '11111111-2222-3333-4444-555555555555'; exit 0;;
   "get project fds-app -o jsonpath={.metadata.uid}") printf 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'; exit 0;;
-  whoami) echo hayeounglee; exit 0;;
+  whoami) [[ -f "$STATE/other-user" ]] && { echo intruder; exit 0; }; echo hayeounglee; exit 0;;
   "auth can-i * * --all-namespaces") [[ "$SCENARIO" == admin ]] && { echo yes; exit 0; }; echo no; exit 1;;
-  "$P auth can-i "*) [[ "$SCENARIO" == no_custom_host && "$a" == *routes/custom-host ]] && { echo no; exit 1; }; echo yes; exit 0;;
+  "$P auth can-i create routes.route.openshift.io --subresource=custom-host")
+    [[ "$SCENARIO" == no_custom_host ]] && { echo no; exit 1; }; echo yes; exit 0;;
+  "$P auth can-i "*/*) echo "mock: TYPE/NAME can-i form is a name lookup" >&2; exit 96;;
+  "$P auth can-i "*) echo yes; exit 0;;
   "$P get networkpolicy,pod,deployment,statefulset,daemonset,replicaset,job,cronjob,service,route -o name")
     for n in $NPS; do echo "networkpolicy.networking.k8s.io/$n"; done
     [[ "$SCENARIO" == extra_obj ]] && echo pod/tcp-allowed
@@ -70,10 +73,21 @@ case "$a" in
     r="${a#"$P get "}"; r="${r%% *}"
     [[ -f "$STATE/gone-${r//\//-}" || ! -f "$STATE/created" ]] && { echo "Error from server (NotFound): $r" >&2; exit 1; }
     echo "$r"; exit 0;;
-  "$P delete "*" --wait=true --timeout=120s")
-    r="${a#"$P delete "}"; r="${r%% *}"
+  "delete --raw="*" -f "*)
+    uri="${a#delete --raw=}"; uri="${uri%% -f *}"; f="${a##* -f }"
+    case "$uri" in
+      /api/v1/namespaces/fds-app/pods/*) r="pod/${uri##*/}";;
+      /api/v1/namespaces/fds-app/services/*) r="service/${uri##*/}";;
+      /apis/route.openshift.io/v1/namespaces/fds-app/routes/*) r="route/${uri##*/}";;
+      *) echo "mock: bad uri $uri" >&2; exit 95;;
+    esac
+    want="$(sed -n 's/.*"preconditions":{"uid":"\([^"]*\)"}.*/\1/p' "$f")"
+    [[ -n "$want" ]] || { echo "mock: no uid precondition" >&2; exit 94; }
+    [[ -f "$STATE/created" && ! -f "$STATE/gone-${r//\//-}" ]] || { echo "Error from server (NotFound): $r" >&2; exit 1; }
+    cur="$(uid_for "$r")"; [[ "$SCENARIO" == uid_race && "$r" == service/* ]] && cur=00000000-0000-0000-0000-00000000race
+    [[ "$want" == "$cur" ]] || { echo "Error from server (Conflict): Operation cannot be fulfilled: Precondition failed: UID in precondition: $want, UID in object meta: $cur" >&2; exit 1; }
     [[ "$SCENARIO" == delete_fail && "$r" == route/* && ! -f "$STATE/delete-ok" ]] && { echo 'Error from server (InternalError)' >&2; exit 1; }
-    touch "$STATE/gone-${r//\//-}"; echo "$r deleted"
+    touch "$STATE/gone-${r//\//-}"; echo '{"kind":"Status","status":"Success"}'
     [[ -f "$STATE/gone-pod-route-host-probe" && -f "$STATE/gone-service-route-host-probe" && -f "$STATE/gone-route-route-host-probe" ]] && rm -f "$STATE/created"
     exit 0;;
   "$P wait --for=condition=Ready pod/route-host-probe --timeout="*) touch "$STATE/ready-done"; [[ "$SCENARIO" == not_ready ]] && { echo 'timed out' >&2; exit 1; }; echo 'condition met'; exit 0;;
@@ -94,6 +108,7 @@ MOCK
 cat >"$T/bin/getent" <<'MOCK'
 #!/usr/bin/env bash
 printf 'getent %s\n' "$*" >>"$CALLLOG"
+[[ "$SCENARIO" == dns_hang ]] && sleep 30
 case "$2" in
   fds-api.apps.rosa.fds-rosa-hcp.khht.p3.openshiftapps.com)
     [[ "$SCENARIO" == dns_nx ]] && exit 2
@@ -127,10 +142,11 @@ exit 3
 MOCK
 cat >"$T/bin/openssl" <<'MOCK'
 #!/usr/bin/env bash
+[[ "$SCENARIO" == cert_hang ]] && sleep 30
 echo "subject=CN=*.apps.rosa.fds-rosa-hcp.khht.p3.openshiftapps.com"; exit 0
 MOCK
 chmod +x "$T/bin/"*
-export PATH="$T/bin:$PATH" ROUTE_POLL_S=0
+export PATH="$T/bin:$PATH" ROUTE_POLL_S=0 ROUTE_CERT_TIMEOUT_S=2
 
 PASS=0; FAIL=0
 ok() { echo "PASS  $*"; PASS=$((PASS+1)); }
@@ -225,6 +241,49 @@ rm -f "$STATE/drift"
 # 7. precheck 뒤 플랫폼 정책 변화 → 생성 전 중단
 scenario n-np2 ok; pre n-np2; touch "$STATE/npchange"; set +e; runp n-np2; rc=$?; set -e
 expect 30 "$rc" "precheck 뒤 정책 변화 → 생성 전 30"
+
+# 9. PR50 R1 — GET 뒤 UID가 바뀌면 서버 DELETE precondition이 409 → 지우지 않고 HOLD
+scenario r1-race uid_race; pre r1-race; set +e; runp r1-race; rc=$?; set -e
+expect 60 "$rc" "R1: 조회 뒤 다른 UID → 409 → 정리 HOLD"
+grep -q 'service/route-host-probe HOLD(UID precondition 거부' "$RD/run/cleanup.txt" && [[ ! -f "$STATE/gone-service-route-host-probe" ]] \
+  && ok "R1: 다른 UID 객체는 삭제되지 않음" || bad "R1: 다른 UID 객체 삭제됨"
+grep -q '"preconditions":{"uid":"00000000-0000-0000-0000-000000000001"}' "$RD/run/delete-options-pod-route-host-probe.json" \
+  && grep -q 'delete --raw=/api/v1/namespaces/fds-app/pods/route-host-probe -f' "$CALLLOG" && ok "R1: DELETE 본문에 기록 UID precondition" || bad "R1: precondition 본문"
+grep -q 'pod/route-host-probe DELETED' "$RD/run/cleanup.txt" && ok "R1: UID가 맞는 객체는 정상 삭제·NotFound" || bad "R1: 정상 UID 삭제"
+[[ ! -f "$RD/cleanup.done" ]] && ok "R1: HOLD면 cleanup.done 없음" || bad "R1: HOLD인데 done"
+
+# 10. PR50 R2 — DNS·인증서 무응답에도 상한 안에서 끝나고 정리로 진입
+scenario r2-dns dns_hang; pre r2-dns; t0=$(date +%s); set +e; runp r2-dns; rc=$?; set -e; el=$(( $(date +%s) - t0 ))
+expect 50 "$rc" "R2: getent 무응답 → R-2 FAIL"
+(( el < 25 )) && ok "R2: getent 무응답이 상한 안에서 종료(${el}s)" || bad "R2: getent 무응답 ${el}s"
+grep -qE '^(124|137)$' "$RD"/run/r2-host-1.rc && ok "R2: 상한 초과 rc 124/137 기록" || bad "R2: rc $(cat "$RD"/run/r2-host-1.rc)"
+[[ "$(result r2-dns R-5)" == PASS ]] && ok "R2: DNS 무응답 뒤에도 OWNED 정리 완료" || bad "R2: 정리 진입 실패"
+scenario r2-cert cert_hang; pre r2-cert; t0=$(date +%s); set +e; runp r2-cert; rc=$?; set -e; el=$(( $(date +%s) - t0 ))
+expect 0 "$rc" "R2: openssl 무응답(진단 기록만) → 판정에 영향 없이 PASS"
+(( el < 25 )) && grep -qE '^(124|137)$' "$RD/run/r3-cert.rc" && ok "R2: openssl 무응답 상한 종료(${el}s, rc $(cat "$RD/run/r3-cert.rc"))" || bad "R2: openssl ${el}s"
+grep -q $'\tlimit=' "$RD/run/commands.tsv" && ok "R2: commands.tsv에 명령별 상한 기록" || bad "R2: 상한 기록 없음"
+
+# 11. PR50 R3 — routes create=yes, custom-host subresource=no 를 분리해 precheck 20·쓰기 0
+scenario r3-ch no_custom_host; set +e; pre r3-ch; rc=$?; set -e
+expect 20 "$rc" "R3: custom-host subresource 권한 없음 → precheck 20"
+grep -q 'routes/custom-host create 권한 없음' "$RD/precheck/stop.txt" && ! grep -q '^routes create 권한 없음' "$RD/precheck/stop.txt" \
+  && ok "R3: routes create는 yes, custom-host만 거부로 구분" || bad "R3: 구분 실패"
+grep -q 'auth can-i create routes.route.openshift.io --subresource=custom-host' "$CALLLOG" && ! grep -q 'can-i create routes/custom-host' "$CALLLOG" \
+  && ok "R3: --subresource 형식 사용(TYPE/NAME 형식 없음)" || bad "R3: 질의 형식"
+[[ "$(writes)" == 0 ]] && ok "R3: 쓰기 0" || bad "R3: 쓰기 발생"
+
+# 12. PR50 R4 — precheck 뒤 사용자 변경 → run 10·쓰기 0, cleanup은 명시된 복구 인수 주체만
+scenario r4-user ok; pre r4-user; touch "$STATE/other-user"; c0="$(writes)"; set +e; runp r4-user; rc=$?; set -e
+expect 10 "$rc" "R4: precheck 뒤 사용자 바뀜 → run 10"
+[[ "$(writes)" == "$c0" ]] && ok "R4: 사용자 불일치 시 쓰기 0" || bad "R4: 쓰기 발생"
+rm -f "$STATE/other-user"
+scenario r4-clean delete_fail; pre r4-clean; set +e; runp r4-clean; rc=$?; set -e; expect 60 "$rc" "R4 준비: 정리 HOLD"
+touch "$STATE/delete-ok" "$STATE/other-user"
+set +e; clean r4-clean; rc=$?; set -e; expect 10 "$rc" "R4: 다른 사용자 cleanup 거부(인수 기록 없음)"
+set +e; RUN_DIR="$RD" APPROVED_BUNDLE_SHA256="$B" RECOVERY_USER=intruder RECOVERY_REF="$GO" bash "$SCRIPT" cleanup >"$T/r4-clean.rec.out" 2>&1; rc=$?; set -e
+expect 0 "$rc" "R4: RECOVERY_USER·RECOVERY_REF로 명시한 인수 주체 cleanup 허용"
+ls "$RD"/cleanup-attempt-*/recovery-actor.txt >/dev/null 2>&1 && ok "R4: 복구 인수 주체 기록" || bad "R4: 인수 기록 없음"
+rm -f "$STATE/other-user"
 
 # 8. 입력·순서 가드
 base_env g; export SCENARIO=ok
