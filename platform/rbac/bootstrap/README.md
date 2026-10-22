@@ -11,14 +11,15 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 | 파일 | 역할 |
 |---|---|
 | `../manifests/namespaces.yaml` | ⑤ Namespace 3개(`fds-app`, `monitoring-api`, `ci-cd`) + label/annotation |
-| `../manifests/rbac.yaml` | ⑦ `ci-cd/fds-deployer` SA, 앱 SA 2개, `fds-app` Role(+`routes/custom-host` create)/RoleBinding |
+| `../manifests/rbac.yaml` | ⑦ `ci-cd/fds-deployer` SA, 앱 SA 2개(Harbor pull Secret 이름 참조, 아래 "앱 SA pull Secret 연결"), `fds-app` Role(+`routes/custom-host` create)/RoleBinding |
 | `../manifests/human-bindings.yaml` | ⑧ 하영 `admin`, 권욱 `view`, 재환 `view` + `fds-app` `monitoring-edit`, 하영 `clusterversion/version` get 1개(#6·#4 수집기의 클러스터 UUID 확인용, cluster 범위 최소 권한) |
 | `bootstrap-session.sh` | 래퍼. 대상 결속(Cluster ID↔API) → grant → `steps.sh` → **성공·실패·INT·TERM·마감 모두** revoke → 회수 확인 → 최종 rc |
 | `steps.sh` | ③~⑩-b 단계. 로그인·결속 → 상태 기록 → manifest 적용 → `--as` 판정·J-1~8 → **배포 SA 실제 token 허용/거부 시험** → 권한 목록 저장·경로 검토 |
 | `collect-access-inventory.sh` | ⑩-b 권한 목록 저장(읽기 전용) |
 | `classify-access-paths.sh` | ⑩-b 경로 분류(오프라인 공용 규칙). bootstrap 과 회수 뒤 재판정에서 같은 규칙. 승인 policy 대조, rc 0/3/1 |
 | `post-revoke-check.sh` | ⑫ 회수 뒤 D-11 판정(회수 전 세션 → 새 로그인 → 관리면·SSAR·경로 검토 → 회수 전 세션 정리) |
-| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` / `mock-test-d11d.sh` / `mock-test-d11d.ps1` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
+| `sa-pull-link.sh` | 앱 SA 2개 Harbor pull Secret 연결(`link`)·이 RUN 소유분만 원복(`revert`). 실패 즉시 중단, ACK 기반 원복 |
+| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` / `mock-test-d11d.sh` / `mock-test-d11d.ps1` / `mock-test-sa-pull-link.sh` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
 
 ## 생성 당일 순서 (요약)
 
@@ -217,6 +218,48 @@ rosa list users -c <id>
 | namespace admin 의 `oc get project <ns>` 허용 | `post-revoke-check.sh` TARGET-uid | 허용 안 되면 UID 대조가 UNKNOWN → FAIL. 그때는 대조 방법을 바꿔 리뷰 |
 | D-10 (만료 token 401) | 별도 | 15분 대기가 필요해 bootstrap 창 밖에서 별도 기록 |
 
+## 앱 SA pull Secret 연결 (infra-rosa#12 결정 [6315085580](https://github.com/321Team/infra-rosa/issues/12#issuecomment-6315085580))
+
+`rbac.yaml`의 앱 SA 2개(`transaction-api-sa`·`fds-engine-sa`)는 Harbor(`10.1.93.54`) pull 전용 Secret `p2-coldpull-harbor-pull`을 **이름으로만** 참조합니다. kubelet이 이 SA로 새로 만들어지는 Pod의 이미지를 받을 때 씁니다. 기존 Pod는 바뀌지 않으므로 **창 C 앱 첫 생성 전에** 연결합니다.
+
+- 대상은 이 SA 2개뿐입니다. `default`·`ci-cd/fds-deployer`에는 연결하지 않고, `fds-deployer`에 Secret GET·SA patch 권한을 주지 않습니다.
+- 실행자는 하영 named admin(`fds-app` admin)입니다. 순서는 #12 카드의 C1 Robot → C2+C3 → 정상 Secret 생성·readback → **이 연결·readback** → 창 C 배포입니다.
+- **이미 있는 SA에는 `oc apply -f rbac.yaml`을 쓰지 않습니다.** `imagePullSecrets`는 병합 키가 없는 목록이라 apply가 목록을 통째로 바꿉니다. 그러면 OpenShift가 붙여 둔 `<sa>-dockercfg-*` 같은 기존 항목이 지워질 수 있습니다. 아래 `sa-pull-link.sh`가 JSON patch로 **추가만** 합니다. 새 클러스터의 첫 bootstrap(`steps.sh`의 apply)에서는 SA가 처음 생성되므로 그대로 둡니다.
+- 비용: 클러스터 내부 설정이라 새 AWS 자원이 없습니다. ROSA 가동 비용은 이권욱 판정 대상입니다.
+- 실행은 `sa-pull-link.sh` 하나로 합니다(PR#52 리뷰 R1·R2·R3). 모든 실패는 그 자리에서 rc≠0으로 멈추고, 부분 성공·응답 불명은 RUN 폴더에 남긴 채 자동 재시도·자동 삭제를 하지 않습니다.
+
+| 단계 | `link` 동작 |
+|---|---|
+| 대상 | **실행 GO 원문의 승인값 `EXPECTED_CONTEXT/API/USER/NS_UID/SECRET_UID`가 없으면 시작하지 않습니다.** 모든 API 호출은 `oc_call`(`--context`·`--server` 고정, `--insecure-skip-tls-verify=false`, 30초/45초 상한)로만 합니다. kubeconfig의 승인 context→server가 승인 API인지 확인합니다(시작·매 patch 직전). RUN 폴더를 **새로** 만들고(이미 있으면 거부) API·사용자·`fds-app` UID를 `target.txt`에 기록한 뒤 승인값과 대조합니다 |
+| Secret | type이 `kubernetes.io/dockerconfigjson`이고 **UID가 `EXPECTED_SECRET_UID`와 같아야** 계속합니다. 값(data)은 읽지 않습니다 |
+| snapshot | SA 2개를 모두 먼저 기록합니다. 하나라도 실패하면 어떤 SA도 바꾸지 않습니다 |
+| SA마다 | `automountServiceAccountToken: false`·같은 이름 항목 없음 확인 → patch(`test` uid·resourceVersion + `add`) intent 기록 → patch → readback(원 목록 + 1개, UID·automount 불변) → **ACK**(배타 생성: RUN·API·namespace UID·Secret UID·SA UID·원 목록·추가 항목) |
+
+| 단계 | `revert` 동작 |
+|---|---|
+| 대상 | 같은 `EXPECTED_*`로 실행합니다. 고정 대상의 API·사용자·`fds-app` UID가 link RUN의 `target.txt`·승인값과 같아야 하고, ACK의 Secret UID·namespace UID·API도 승인값과 같아야 합니다 |
+| SA마다 | **ACK가 있는 SA만** 대상입니다. intent만 있고 ACK가 없으면 UNKNOWN으로 남기고 지우지 않습니다. 현재 SA UID가 ACK와 다르면(같은 이름 재생성) 거부합니다 |
+| 삭제 | `test` uid·resourceVersion·항목 이름 + `remove` 1개 → readback(직전 목록에서 자기 항목만 빠짐, UID·automount 불변) → revert ACK. revert intent가 이미 있으면 다시 지우지 않습니다 |
+
+```bash
+# 하영 named admin으로 oc login 된 셸에서. 값은 실행 GO 원문의 승인값을 그대로 씁니다(추정·조회값으로 채우지 않음).
+export EXPECTED_CONTEXT='<승인 context 이름>' EXPECTED_API='<승인 API URL>' EXPECTED_USER='<승인 사용자>'
+export EXPECTED_NS_UID='<승인 fds-app UID>' EXPECTED_SECRET_UID='<승인 p2-coldpull-harbor-pull UID>'
+RUN=~/sa-pull-link-$(TZ=KST-9 date +%Y%m%dT%H%M%S)   # 회수 때 같은 경로를 씁니다
+bash platform/rbac/bootstrap/sa-pull-link.sh link "$RUN"      # RESULT=LINK_PASS
+```
+
+**원복** (회수 상한 10/23 23:59 KST, Secret·Robot 회수보다 먼저): 앱 소비를 멈춘 뒤, link 때의 같은 RUN 폴더로 실행합니다. 다른 셸·다른 날이라도 그 RUN 폴더를 그대로 넘겨받아 씁니다.
+
+```bash
+# link 때와 같은 EXPECTED_* 를 export 한 뒤
+bash platform/rbac/bootstrap/sa-pull-link.sh revert "$RUN"    # RESULT=REVERT_PASS
+```
+
+`RESULT=STOP`이 나오면 다시 실행하지 말고 `$RUN/ledger.txt`와 그 단계 파일로 수동 readback한 뒤 인수합니다.
+
+회수 뒤에도 앱을 계속 띄우려면 Robot·Secret 수명 연장이 먼저 필요합니다(이권욱 GO). 연장하지 않으면 이 매니페스트의 두 줄도 후속 PR로 되돌립니다.
+
 ## MOCK 실행 (비용 없음, 클라우드 호출 없음, jq 필요)
 
 ```bash
@@ -227,6 +270,7 @@ bash platform/rbac/bootstrap/mock-test-post.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-classify.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-receipt.sh; echo "rc=$?"   # jq 불필요
 bash platform/rbac/bootstrap/mock-test-d11d.sh; echo "rc=$?"      # README D-11d Bash 예시 그대로 실행, jq 불필요
+bash platform/rbac/bootstrap/mock-test-sa-pull-link.sh; echo "rc=$?"   # 가짜 oc, jq 불필요(python3 필요, Windows는 PY=py)
 # Windows: powershell -NoProfile -ExecutionPolicy Bypass -File platform/rbac/bootstrap/mock-test-d11d.ps1   # README D-11d PowerShell 예시
 ```
 
