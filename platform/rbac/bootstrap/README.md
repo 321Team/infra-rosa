@@ -226,30 +226,33 @@ rosa list users -c <id>
 - 실행자는 하영 named admin(`fds-app` admin)입니다. 순서는 #12 카드의 C1 Robot → C2+C3 → 정상 Secret 생성·readback → **이 연결·readback** → 창 C 배포입니다.
 - **이미 있는 SA에는 `oc apply -f rbac.yaml`을 쓰지 않습니다.** `imagePullSecrets`는 병합 키가 없는 목록이라 apply가 목록을 통째로 바꿉니다. 그러면 OpenShift가 붙여 둔 `<sa>-dockercfg-*` 같은 기존 항목이 지워질 수 있습니다. 아래 `sa-pull-link.sh`가 JSON patch로 **추가만** 합니다. 새 클러스터의 첫 bootstrap(`steps.sh`의 apply)에서는 SA가 처음 생성되므로 그대로 둡니다.
 - 비용: 클러스터 내부 설정이라 새 AWS 자원이 없습니다. ROSA 가동 비용은 이권욱 판정 대상입니다.
-- 실행은 `sa-pull-link.sh` 하나로 합니다(PR#52 리뷰 R1·R2). 모든 실패는 그 자리에서 rc≠0으로 멈추고, 부분 성공·응답 불명은 RUN 폴더에 남긴 채 자동 재시도·자동 삭제를 하지 않습니다.
+- 실행은 `sa-pull-link.sh` 하나로 합니다(PR#52 리뷰 R1·R2·R3). 모든 실패는 그 자리에서 rc≠0으로 멈추고, 부분 성공·응답 불명은 RUN 폴더에 남긴 채 자동 재시도·자동 삭제를 하지 않습니다.
 
 | 단계 | `link` 동작 |
 |---|---|
-| 대상 | RUN 폴더를 **새로** 만듭니다(이미 있으면 거부, 원 snapshot 보존). API 주소·사용자·`fds-app` UID를 `target.txt`에 기록 |
-| Secret | type이 `kubernetes.io/dockerconfigjson`이고 UID가 있어야 계속합니다. 값(data)은 읽지 않습니다 |
+| 대상 | **실행 GO 원문의 승인값 `EXPECTED_CONTEXT/API/USER/NS_UID/SECRET_UID`가 없으면 시작하지 않습니다.** 모든 API 호출은 `oc_call`(`--context`·`--server` 고정, `--insecure-skip-tls-verify=false`, 30초/45초 상한)로만 합니다. kubeconfig의 승인 context→server가 승인 API인지 확인합니다(시작·매 patch 직전). RUN 폴더를 **새로** 만들고(이미 있으면 거부) API·사용자·`fds-app` UID를 `target.txt`에 기록한 뒤 승인값과 대조합니다 |
+| Secret | type이 `kubernetes.io/dockerconfigjson`이고 **UID가 `EXPECTED_SECRET_UID`와 같아야** 계속합니다. 값(data)은 읽지 않습니다 |
 | snapshot | SA 2개를 모두 먼저 기록합니다. 하나라도 실패하면 어떤 SA도 바꾸지 않습니다 |
 | SA마다 | `automountServiceAccountToken: false`·같은 이름 항목 없음 확인 → patch(`test` uid·resourceVersion + `add`) intent 기록 → patch → readback(원 목록 + 1개, UID·automount 불변) → **ACK**(배타 생성: RUN·API·namespace UID·Secret UID·SA UID·원 목록·추가 항목) |
 
 | 단계 | `revert` 동작 |
 |---|---|
-| 대상 | 현재 API·사용자·`fds-app` UID가 link RUN의 `target.txt`와 같아야 합니다 |
+| 대상 | 같은 `EXPECTED_*`로 실행합니다. 고정 대상의 API·사용자·`fds-app` UID가 link RUN의 `target.txt`·승인값과 같아야 하고, ACK의 Secret UID·namespace UID·API도 승인값과 같아야 합니다 |
 | SA마다 | **ACK가 있는 SA만** 대상입니다. intent만 있고 ACK가 없으면 UNKNOWN으로 남기고 지우지 않습니다. 현재 SA UID가 ACK와 다르면(같은 이름 재생성) 거부합니다 |
 | 삭제 | `test` uid·resourceVersion·항목 이름 + `remove` 1개 → readback(직전 목록에서 자기 항목만 빠짐, UID·automount 불변) → revert ACK. revert intent가 이미 있으면 다시 지우지 않습니다 |
 
 ```bash
-# 하영 named admin으로 oc login 된 셸에서. RUN 폴더는 회수 때 같은 경로를 씁니다.
-RUN=~/sa-pull-link-$(TZ=KST-9 date +%Y%m%dT%H%M%S)
+# 하영 named admin으로 oc login 된 셸에서. 값은 실행 GO 원문의 승인값을 그대로 씁니다(추정·조회값으로 채우지 않음).
+export EXPECTED_CONTEXT='<승인 context 이름>' EXPECTED_API='<승인 API URL>' EXPECTED_USER='<승인 사용자>'
+export EXPECTED_NS_UID='<승인 fds-app UID>' EXPECTED_SECRET_UID='<승인 p2-coldpull-harbor-pull UID>'
+RUN=~/sa-pull-link-$(TZ=KST-9 date +%Y%m%dT%H%M%S)   # 회수 때 같은 경로를 씁니다
 bash platform/rbac/bootstrap/sa-pull-link.sh link "$RUN"      # RESULT=LINK_PASS
 ```
 
 **원복** (회수 상한 10/23 23:59 KST, Secret·Robot 회수보다 먼저): 앱 소비를 멈춘 뒤, link 때의 같은 RUN 폴더로 실행합니다. 다른 셸·다른 날이라도 그 RUN 폴더를 그대로 넘겨받아 씁니다.
 
 ```bash
+# link 때와 같은 EXPECTED_* 를 export 한 뒤
 bash platform/rbac/bootstrap/sa-pull-link.sh revert "$RUN"    # RESULT=REVERT_PASS
 ```
 
