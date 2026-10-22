@@ -11,7 +11,7 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 | 파일 | 역할 |
 |---|---|
 | `../manifests/namespaces.yaml` | ⑤ Namespace 3개(`fds-app`, `monitoring-api`, `ci-cd`) + label/annotation |
-| `../manifests/rbac.yaml` | ⑦ `ci-cd/fds-deployer` SA, 앱 SA 2개, `fds-app` Role(+`routes/custom-host` create)/RoleBinding |
+| `../manifests/rbac.yaml` | ⑦ `ci-cd/fds-deployer` SA, 앱 SA 2개(Harbor pull Secret 이름 참조, 아래 "앱 SA pull Secret 연결"), `fds-app` Role(+`routes/custom-host` create)/RoleBinding |
 | `../manifests/human-bindings.yaml` | ⑧ 하영 `admin`, 권욱 `view`, 재환 `view` + `fds-app` `monitoring-edit`, 하영 `clusterversion/version` get 1개(#6·#4 수집기의 클러스터 UUID 확인용, cluster 범위 최소 권한) |
 | `bootstrap-session.sh` | 래퍼. 대상 결속(Cluster ID↔API) → grant → `steps.sh` → **성공·실패·INT·TERM·마감 모두** revoke → 회수 확인 → 최종 rc |
 | `steps.sh` | ③~⑩-b 단계. 로그인·결속 → 상태 기록 → manifest 적용 → `--as` 판정·J-1~8 → **배포 SA 실제 token 허용/거부 시험** → 권한 목록 저장·경로 검토 |
@@ -216,6 +216,74 @@ rosa list users -c <id>
 | `rosa list users` 본문 행 형식·그룹 이름 | `ROSA_USERS_ROW_RE` (래퍼·post) | 머리글이 맞아도 본문 한 행이라도 형식이 다르면 UNKNOWN → 회수 확인 실패(rc1). 실제 형식으로 확정 |
 | namespace admin 의 `oc get project <ns>` 허용 | `post-revoke-check.sh` TARGET-uid | 허용 안 되면 UID 대조가 UNKNOWN → FAIL. 그때는 대조 방법을 바꿔 리뷰 |
 | D-10 (만료 token 401) | 별도 | 15분 대기가 필요해 bootstrap 창 밖에서 별도 기록 |
+
+## 앱 SA pull Secret 연결 (infra-rosa#12 결정 [6315085580](https://github.com/321Team/infra-rosa/issues/12#issuecomment-6315085580))
+
+`rbac.yaml`의 앱 SA 2개(`transaction-api-sa`·`fds-engine-sa`)는 Harbor(`10.1.93.54`) pull 전용 Secret `p2-coldpull-harbor-pull`을 **이름으로만** 참조합니다. kubelet이 이 SA로 새로 만들어지는 Pod의 이미지를 받을 때 씁니다. 기존 Pod는 바뀌지 않으므로 **창 C 앱 첫 생성 전에** 연결합니다.
+
+- 대상은 이 SA 2개뿐입니다. `default`·`ci-cd/fds-deployer`에는 연결하지 않고, `fds-deployer`에 Secret GET·SA patch 권한을 주지 않습니다.
+- 실행자는 하영 named admin(`fds-app` admin)입니다. 순서는 #12 카드의 C1 Robot → C2+C3 → 정상 Secret 생성·readback → **이 연결·readback** → 창 C 배포입니다.
+- **이미 있는 SA에는 `oc apply -f rbac.yaml`을 쓰지 않습니다.** `imagePullSecrets`는 병합 키가 없는 목록이라 apply가 목록을 통째로 바꿉니다. 그러면 OpenShift가 붙여 둔 `<sa>-dockercfg-*` 같은 기존 항목이 지워질 수 있습니다. 아래 JSON patch로 **추가만** 합니다. 새 클러스터의 첫 bootstrap(`steps.sh`의 apply)에서는 SA가 처음 생성되므로 그대로 둡니다.
+- 비용: 클러스터 내부 설정이라 새 AWS 자원이 없습니다. ROSA 가동 비용은 이권욱 판정 대상입니다.
+
+```bash
+NS=fds-app; SECRET=p2-coldpull-harbor-pull
+# 1) Secret 존재·type만 확인 (data는 출력하지 않음). kubernetes.io/dockerconfigjson 이 아니면 STOP
+oc get secret "$SECRET" -n "$NS" -o jsonpath='{.type}{" "}{.metadata.uid}{"\n"}'
+# 2) 변경 전 SA 기록 (SA에는 Secret 값이 없고 이름 참조만 있음)
+for sa in transaction-api-sa fds-engine-sa; do oc get sa "$sa" -n "$NS" -o json >"before-$sa.json" || echo "STOP $sa"; done
+# 3) SA마다 resourceVersion 고정 + 항목 1개 추가. 이미 같은 이름이 있으면 STOP(수동 readback)
+for sa in transaction-api-sa fds-engine-sa; do
+  PATCH=$(python3 - "before-$sa.json" "$SECRET" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1])); s = sys.argv[2]; cur = o.get("imagePullSecrets")
+ops = [{"op": "test", "path": "/metadata/resourceVersion", "value": o["metadata"]["resourceVersion"]}]
+if cur is None:
+    ops.append({"op": "add", "path": "/imagePullSecrets", "value": [{"name": s}]})
+elif any(e.get("name") == s for e in cur):
+    sys.exit("ALREADY_PRESENT")
+else:
+    ops.append({"op": "add", "path": "/imagePullSecrets/-", "value": {"name": s}})
+print(json.dumps(ops))
+PY
+  ) && oc patch sa "$sa" -n "$NS" --type=json -p "$PATCH" || { echo "STOP $sa"; break; }
+done
+# 4) readback: 기존 항목 + 새 항목 1개, UID·automountServiceAccountToken 불변
+for sa in transaction-api-sa fds-engine-sa; do
+  oc get sa "$sa" -n "$NS" -o json >"after-$sa.json"
+  python3 - "before-$sa.json" "after-$sa.json" "$SECRET" <<'PY'
+import json, sys
+b, a, s = json.load(open(sys.argv[1])), json.load(open(sys.argv[2])), sys.argv[3]
+want = (b.get("imagePullSecrets") or []) + [{"name": s}]
+ok = (a.get("imagePullSecrets") == want and a["metadata"]["uid"] == b["metadata"]["uid"]
+      and a.get("automountServiceAccountToken") is False)
+print(a["metadata"]["name"], "SA_PULL_LINK_PASS" if ok else "SA_PULL_LINK_FAIL", [e["name"] for e in a.get("imagePullSecrets", [])])
+PY
+done
+```
+
+**원복** (회수 상한 10/23 23:59 KST, Secret·Robot 회수보다 먼저): 앱 소비를 멈춘 뒤, 이번에 추가한 항목 1개만 지웁니다. 다른 항목은 건드리지 않습니다.
+
+```bash
+for sa in transaction-api-sa fds-engine-sa; do
+  oc get sa "$sa" -n "$NS" -o json >"pre-revert-$sa.json"
+  PATCH=$(python3 - "pre-revert-$sa.json" "$SECRET" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1])); s = sys.argv[2]
+idx = [i for i, e in enumerate(o.get("imagePullSecrets") or []) if e.get("name") == s]
+if len(idx) != 1:
+    sys.exit("NOT_EXACTLY_ONE")
+i = idx[0]
+print(json.dumps([{"op": "test", "path": "/metadata/resourceVersion", "value": o["metadata"]["resourceVersion"]},
+                  {"op": "test", "path": f"/imagePullSecrets/{i}/name", "value": s},
+                  {"op": "remove", "path": f"/imagePullSecrets/{i}"}]))
+PY
+  ) && oc patch sa "$sa" -n "$NS" --type=json -p "$PATCH" || { echo "STOP $sa"; break; }
+  oc get sa "$sa" -n "$NS" -o jsonpath='{.metadata.name}{" "}{.imagePullSecrets[*].name}{"\n"}'
+done
+```
+
+회수 뒤에도 앱을 계속 띄우려면 Robot·Secret 수명 연장이 먼저 필요합니다(이권욱 GO). 연장하지 않으면 이 매니페스트의 두 줄도 후속 PR로 되돌립니다.
 
 ## MOCK 실행 (비용 없음, 클라우드 호출 없음, jq 필요)
 

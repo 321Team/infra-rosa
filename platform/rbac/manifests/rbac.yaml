@@ -9,6 +9,8 @@ metadata:
 automountServiceAccountToken: false
 ---
 # 앱 SA 2개 — fds-msa deploy/base(c2372da) 이름 그대로, 추가 권한 binding 없음(§3-4)
+# imagePullSecrets: Harbor(10.1.93.54) pull 전용 Secret 이름만 참조(infra-rosa#12 결정 6315085580). 새 Pod에만 상속.
+# 이미 있는 SA에는 oc apply 대신 README "앱 SA pull Secret 연결"의 JSON patch로 추가한다(apply는 목록을 통째로 바꿀 수 있음).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -16,6 +18,8 @@ metadata:
   namespace: fds-app
   labels: {team: 321team, project: fds-hybrid, purpose: app}
 automountServiceAccountToken: false
+imagePullSecrets:
+  - name: p2-coldpull-harbor-pull
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -24,6 +28,8 @@ metadata:
   namespace: fds-app
   labels: {team: 321team, project: fds-hybrid, purpose: app}
 automountServiceAccountToken: false
+imagePullSecrets:
+  - name: p2-coldpull-harbor-pull
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
