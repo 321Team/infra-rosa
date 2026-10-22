@@ -11,6 +11,9 @@ MODE="${1:-}"; [[ "$MODE" == on || "$MODE" == off ]] || { echo "사용: bash rea
 WORKDIR="${WORKDIR:-$HOME/rosa-netpol-reader}"
 : "${API_URL:?API_URL 필요}"
 export KUBECONFIG="$WORKDIR/kubeconfig"
+EXPECT_USER="${EXPECT_USER:-hayeoung}"
+# 모든 oc 호출에 요청·프로세스 상한(PR53 R2와 같은 기준). 초과는 FAIL/STOP(판정 불가)
+_oc() { timeout -k 10 "${READER_CALL_S:-60}" oc --request-timeout="${READER_REQ_S:-30}s" "$@"; }
 RD=$(ls -dt "$WORKDIR"/netpol-reader-"$MODE"-* 2>/dev/null | head -1) || true
 [[ -n "$RD" && -d "$RD" ]] || { echo "STOP: $MODE 단계 기록 폴더 없음(래퍼 단계가 먼저)" >&2; exit 2; }
 CK="$RD/check"; mkdir -p "$CK"
@@ -24,15 +27,16 @@ gs=$(grep -n 'GRANT_START' "$WORKDIR/session-events.log" | tail -1 | cut -d: -f1
 sed -n "${gs},\$p" "$WORKDIR/session-events.log" >"$CK/last-session.log"
 grep -qF "STEPS_RD $RD" "$CK/last-session.log" && grep -q 'REVOKE_VERIFIED' "$CK/last-session.log" && grep -q 'CLEANUP_END final_rc=0$' "$CK/last-session.log" \
   || { log "STOP: 마지막 래퍼 회차가 이 단계·REVOKE_VERIFIED·rc0으로 끝나지 않음 — 회수 먼저 확인"; exit 1; }
-[[ "$(oc whoami --show-server)" == "$API_URL" ]] || { log "STOP: server 불일치"; exit 1; }
-oc whoami >"$CK/whoami.out" 2>"$CK/whoami.err" || { log "STOP: whoami 실패(세션 만료면 oc login 후 다시)"; exit 1; }
+[[ "$(_oc whoami --show-server)" == "$API_URL" ]] || { log "STOP: server 불일치 또는 조회 실패"; exit 1; }
+_oc whoami >"$CK/whoami.out" 2>"$CK/whoami.err" || { log "STOP: whoami 실패(세션 만료면 oc login 후 다시)"; exit 1; }
+[[ "$(<"$CK/whoami.out")" == "$EXPECT_USER" ]] || { log "STOP: 확인 주체가 $EXPECT_USER 아님($(<"$CK/whoami.out"))"; exit 1; }
 log "계정: $(<"$CK/whoami.out")"
 
 # 클러스터 범위 질의에 붙는 scope 경고만 있는 stderr 허용(#5 steps.sh _scope_warning_only와 같은 기준)
 scope_only() { local rc=0; grep -vE "^(Warning: resource '[a-z0-9.-]+' is not namespace scoped( in group '[a-z0-9.-]+')?)?$" "$1" >/dev/null || rc=$?; [[ $rc -eq 1 ]]; }
 cani() { # id want args...
   local id=$1 want=$2 rc=0 got=OTHER; shift 2
-  oc auth can-i "$@" >"$CK/$id.out" 2>"$CK/$id.err" || rc=$?
+  _oc auth can-i "$@" >"$CK/$id.out" 2>"$CK/$id.err" || rc=$?
   [[ $rc -eq 0 && "$(<"$CK/$id.out")" == yes ]] && scope_only "$CK/$id.err" && got=yes
   [[ $rc -eq 1 && "$(<"$CK/$id.out")" == no ]] && scope_only "$CK/$id.err" && got=no
   printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$*" "$want" "$got" "$rc" >>"$CK/results.tsv"
@@ -53,8 +57,8 @@ cani N-5 no create clusterrolebindings
 cani N-6 no '*' '*' --all-namespaces
 cani K-1 yes create networkpolicies -n fds-app
 if [[ $MODE == on ]]; then
-  oc get nodes -o name >"$CK/nodes.out" 2>"$CK/nodes.err" && [[ $(grep -c '^node/' "$CK/nodes.out") -ge 1 ]] || { FAIL=1; log "FAIL 실제 nodes 읽기"; }
-  oc get network.config cluster -o 'jsonpath={.status.networkType}' >"$CK/network.out" 2>"$CK/network.err" && [[ "$(<"$CK/network.out")" == OVNKubernetes ]] || { FAIL=1; log "FAIL 실제 network.config 읽기"; }
+  _oc get nodes -o name >"$CK/nodes.out" 2>"$CK/nodes.err" && [[ $(grep -c '^node/' "$CK/nodes.out") -ge 1 ]] || { FAIL=1; log "FAIL 실제 nodes 읽기"; }
+  _oc get network.config cluster -o 'jsonpath={.status.networkType}' >"$CK/network.out" 2>"$CK/network.err" && [[ "$(<"$CK/network.out")" == OVNKubernetes ]] || { FAIL=1; log "FAIL 실제 network.config 읽기"; }
 fi
 # 반출: 이 단계 기록 + 래퍼 회수 원본(token·kubeconfig 제외)
 mkdir -p "$RD/wrapper"

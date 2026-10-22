@@ -37,17 +37,22 @@ bash reader-check.sh off
 
 | 단계 | 판정 | 멈춤 |
 |---|---|---|
-| on | 두 객체가 **없을 때만** `oc create`(덮어쓰기 없음) → create 출력·UID 확인 → binding 대상 = `fds-netpol-window-reader`·`User:hayeoung` 하나 → UID를 `$WORKDIR/netpol-reader-current.env`에 기록 | 이미 있음·조회 오류 → 만들지 않음. 일부만 생성 → UNKNOWN(떼기 전에 사람 확인). 실패해도 래퍼가 cluster-admin은 회수 |
-| check on | 마지막 래퍼 회차가 이 단계·`REVOKE_VERIFIED`·`final_rc=0`으로 끝났는지 → 읽기 4종 **yes**, Secret 읽기·openshift-dns Pod 생성·node 삭제·network 수정·CRB 생성·`* *` **no**, `fds-app` NP 생성 yes, 실제 nodes·networkType 읽기 | 하나라도 다르면 FAIL — 떼기(③)로 |
-| off | 기록 UID = 현재 UID일 때만 **Binding → Role** 순서로 삭제 → NotFound | UID 불일치·조회 오류·기록 없음 → 지우지 않고 STOP·인계 |
+| on | 두 객체가 **없을 때만** `oc create`(덮어쓰기 없음) → **create 응답의 객체별 UID(ACK)** 기록 → 이어서 GET한 UID가 ACK와 같을 때만 자기 소유로 채택 → binding 대상 = `fds-netpol-window-reader`·`User:hayeoung` 하나 → `$WORKDIR/netpol-reader-current.env` | 이미 있음·조회 오류 → 만들지 않음. 응답에 UID 없음·일부 생성·생성 직후 UID가 응답과 다름(교체) → 채택하지 않고 UNKNOWN(떼기 전에 사람 확인). 실패해도 래퍼가 cluster-admin은 회수 |
+| check on | 마지막 래퍼 회차가 이 단계·`REVOKE_VERIFIED`·`final_rc=0`으로 끝났는지, whoami = `hayeoung`(`EXPECT_USER`) → 읽기 4종 **yes**, Secret 읽기·openshift-dns Pod 생성·node 삭제·network 수정·CRB 생성·`* *` **no**, `fds-app` NP 생성 yes, 실제 nodes·networkType 읽기 | 하나라도 다르면 FAIL — 떼기(③)로 |
+| off | 기록 UID = 현재 UID 확인 → **삭제 요청 자체에 UID 조건**(`oc delete --raw /apis/rbac.authorization.k8s.io/v1/<clusterrolebindings\|clusterroles>/<이름> -f <DeleteOptions preconditions.uid>`)을 넣어 **Binding → Role** 순서로 삭제 → NotFound. GET과 DELETE 사이 교체는 서버가 409로 거부([DeleteOptions](https://kubernetes.io/docs/reference/kubernetes-api/definitions/delete-options-v1-meta/)) | UID 불일치·409·응답 불명·조회 오류·기록 없음 → 지우지 않고 STOP·인계(자동 재시도·다른 이름 삭제 없음) |
 | check off | 읽기 4종 **no**(#5 ⑫ 상태) | — |
 
+- **시간 상한(PR53 R2):** 단계·확인의 모든 `oc` 호출은 `--request-timeout=30s` + `timeout -k 10 60`(로그인은 비밀번호 입력 포함 180초, `--foreground`). 상한 초과·응답 불명은 UNKNOWN으로 멈추고 래퍼의 cluster-admin revoke로 넘어간다. 래퍼 watchdog은 foreground 명령이 끝난 뒤 처리되므로 이 상한이 실제 회수 지연을 막는다.
+- ⚠ **래퍼는 cluster-admin만 자동 회수한다. reader binding은 ③ 떼기로 따로 회수**해야 한다 — 실행 카드에 떼기 담당·시각을 적는다.
 - 자동 재시도 없음. 래퍼가 중간에 끊겨도 trap이 revoke한다(SIGKILL·세션 유실은 두 번째 관리 세션에서 수동 revoke — #5와 같음).
 - 반출: `reader-check.sh`가 단계 기록 + 래퍼 회수 원본(`session-events.log`·`verify-*`·`revoke.*`·`preflight-cluster.json`)을 묶는다. kubeconfig·token은 넣지 않는다. #5 receipt(`99-receipt.env`)는 이 회차에 발행되지 않는 것이 정상(증적 변수 `EV` 미사용).
 
 ## 3. 시험
 
-`bash platform/netpol/access/tests/reader-mock.sh` → **13/13 PASS**(2026-10-22, Windows Git Bash, 가짜 `oc`, 래퍼는 log 줄로 흉내). 정상 on→check→off→check, Binding 먼저 삭제, scope 경고 허용, 이미 있음·UID 불일치·기록 없음·일부 생성 STOP, 회수 확인 없는 회차 판정 거부, Secret 읽기 yes FAIL, token 미기록. **실제 ROSA·래퍼 grant/revoke 동작 PASS가 아니다.**
+`bash platform/netpol/access/tests/reader-mock.sh` → **18/18 PASS**(2026-10-22, Windows Git Bash, 가짜 `oc`·`rosa`·`jq`).
+- **실제 래퍼(`bootstrap-session.sh`) 경로 W1~W4:** 정상 on→check→off→check 1쌍, 멈춘 API(30초 sleep)에서 상한으로 STOP → 실제 래퍼 revoke·`REVOKE_VERIFIED`.
+- 단계 판정: 생성 ACK 뒤 교체 미채택, GET→DELETE 사이 교체 시 409·교체 Binding 보존, 삭제 요청 UID 조건, Binding 먼저, 이미 있음·기록 없음·일부 생성·create 응답 멈춤 STOP, scope 경고 허용, 회수 확인 없는 회차 판정 거부, Secret 읽기 yes FAIL, whoami 불일치 STOP, token 미기록.
+- **실제 ROSA·rosa grant/revoke·API 409 동작 PASS가 아니다.**
 
 💰 권한 변경은 과금 자원과 무관하다.
 
