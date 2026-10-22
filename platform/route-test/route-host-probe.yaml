@@ -1,0 +1,79 @@
+# baseline#38 8행 "Route 생성 가능 상태" — 승인 host 시험 Route (infra-rosa#4 Handoff 2 host)
+# 계획 baseline#38 6285881794, 권욱 검토 6286641386 보완 반영.
+# - 기본 IngressController·기본 *.apps 인증서 사용(새 DNS·LB·인증서·IngressController 변경 없음).
+# - #7 뒤 남는 02 정책(allow-ingress-from-router): Pod label route-exposed="true", router namespace의 TCP 8080만 허용.
+#   그래서 컨테이너 8080·Service port/targetPort 8080·Pod label을 이 값으로 고정한다(정책 완화 없음).
+# - 이름 route-host-probe는 앱(transaction-api-*)·#7 시험(route-probe)과 겹치지 않는다. oc create로만 만든다.
+# __NS__ __TEAM__ __ROUTE_HOST__ __HTTP_IMAGE__ 는 route-test-run.sh render가 승인 입력으로 채운다.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: route-host-probe
+  namespace: __NS__
+  labels:
+    app: route-host-probe
+    route-exposed: "true"
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: route-host-test
+spec:
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  containers:
+    - name: httpd
+      image: __HTTP_IMAGE__
+      ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+      readinessProbe:
+        tcpSocket: { port: 8080 }
+        periodSeconds: 5
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { cpu: 100m, memory: 128Mi }
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities: { drop: ["ALL"] }
+        seccompProfile: { type: RuntimeDefault }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: route-host-probe
+  namespace: __NS__
+  labels:
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: route-host-test
+spec:
+  selector:
+    app: route-host-probe
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: route-host-probe
+  namespace: __NS__
+  labels:
+    project: fds-hybrid
+    team: __TEAM__
+    purpose: route-host-test
+spec:
+  host: __ROUTE_HOST__
+  to:
+    kind: Service
+    name: route-host-probe
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
