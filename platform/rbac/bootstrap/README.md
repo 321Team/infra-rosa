@@ -18,7 +18,8 @@ ROSA 생성 직후 첫 설정(IdP → RBAC)을 **임시 cluster-admin을 반드�
 | `collect-access-inventory.sh` | ⑩-b 권한 목록 저장(읽기 전용) |
 | `classify-access-paths.sh` | ⑩-b 경로 분류(오프라인 공용 규칙). bootstrap 과 회수 뒤 재판정에서 같은 규칙. 승인 policy 대조, rc 0/3/1 |
 | `post-revoke-check.sh` | ⑫ 회수 뒤 D-11 판정(회수 전 세션 → 새 로그인 → 관리면·SSAR·경로 검토 → 회수 전 세션 정리) |
-| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` / `mock-test-d11d.sh` / `mock-test-d11d.ps1` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
+| `sa-pull-link.sh` | 앱 SA 2개 Harbor pull Secret 연결(`link`)·이 RUN 소유분만 원복(`revert`). 실패 즉시 중단, ACK 기반 원복 |
+| `mock-test.sh` / `mock-test-inventory.sh` / `mock-test-post.sh` / `mock-test-classify.sh` / `mock-test-receipt.sh` / `mock-test-d11d.sh` / `mock-test-d11d.ps1` / `mock-test-sa-pull-link.sh` | 가짜 rosa/oc 로 하는 MOCK 시험. 클라우드 호출 없음, 비용 없음. FAIL 이 하나라도 있으면 rc1 |
 
 ## 생성 당일 순서 (요약)
 
@@ -223,65 +224,36 @@ rosa list users -c <id>
 
 - 대상은 이 SA 2개뿐입니다. `default`·`ci-cd/fds-deployer`에는 연결하지 않고, `fds-deployer`에 Secret GET·SA patch 권한을 주지 않습니다.
 - 실행자는 하영 named admin(`fds-app` admin)입니다. 순서는 #12 카드의 C1 Robot → C2+C3 → 정상 Secret 생성·readback → **이 연결·readback** → 창 C 배포입니다.
-- **이미 있는 SA에는 `oc apply -f rbac.yaml`을 쓰지 않습니다.** `imagePullSecrets`는 병합 키가 없는 목록이라 apply가 목록을 통째로 바꿉니다. 그러면 OpenShift가 붙여 둔 `<sa>-dockercfg-*` 같은 기존 항목이 지워질 수 있습니다. 아래 JSON patch로 **추가만** 합니다. 새 클러스터의 첫 bootstrap(`steps.sh`의 apply)에서는 SA가 처음 생성되므로 그대로 둡니다.
+- **이미 있는 SA에는 `oc apply -f rbac.yaml`을 쓰지 않습니다.** `imagePullSecrets`는 병합 키가 없는 목록이라 apply가 목록을 통째로 바꿉니다. 그러면 OpenShift가 붙여 둔 `<sa>-dockercfg-*` 같은 기존 항목이 지워질 수 있습니다. 아래 `sa-pull-link.sh`가 JSON patch로 **추가만** 합니다. 새 클러스터의 첫 bootstrap(`steps.sh`의 apply)에서는 SA가 처음 생성되므로 그대로 둡니다.
 - 비용: 클러스터 내부 설정이라 새 AWS 자원이 없습니다. ROSA 가동 비용은 이권욱 판정 대상입니다.
+- 실행은 `sa-pull-link.sh` 하나로 합니다(PR#52 리뷰 R1·R2). 모든 실패는 그 자리에서 rc≠0으로 멈추고, 부분 성공·응답 불명은 RUN 폴더에 남긴 채 자동 재시도·자동 삭제를 하지 않습니다.
+
+| 단계 | `link` 동작 |
+|---|---|
+| 대상 | RUN 폴더를 **새로** 만듭니다(이미 있으면 거부, 원 snapshot 보존). API 주소·사용자·`fds-app` UID를 `target.txt`에 기록 |
+| Secret | type이 `kubernetes.io/dockerconfigjson`이고 UID가 있어야 계속합니다. 값(data)은 읽지 않습니다 |
+| snapshot | SA 2개를 모두 먼저 기록합니다. 하나라도 실패하면 어떤 SA도 바꾸지 않습니다 |
+| SA마다 | `automountServiceAccountToken: false`·같은 이름 항목 없음 확인 → patch(`test` uid·resourceVersion + `add`) intent 기록 → patch → readback(원 목록 + 1개, UID·automount 불변) → **ACK**(배타 생성: RUN·API·namespace UID·Secret UID·SA UID·원 목록·추가 항목) |
+
+| 단계 | `revert` 동작 |
+|---|---|
+| 대상 | 현재 API·사용자·`fds-app` UID가 link RUN의 `target.txt`와 같아야 합니다 |
+| SA마다 | **ACK가 있는 SA만** 대상입니다. intent만 있고 ACK가 없으면 UNKNOWN으로 남기고 지우지 않습니다. 현재 SA UID가 ACK와 다르면(같은 이름 재생성) 거부합니다 |
+| 삭제 | `test` uid·resourceVersion·항목 이름 + `remove` 1개 → readback(직전 목록에서 자기 항목만 빠짐, UID·automount 불변) → revert ACK. revert intent가 이미 있으면 다시 지우지 않습니다 |
 
 ```bash
-NS=fds-app; SECRET=p2-coldpull-harbor-pull
-# 1) Secret 존재·type만 확인 (data는 출력하지 않음). kubernetes.io/dockerconfigjson 이 아니면 STOP
-oc get secret "$SECRET" -n "$NS" -o jsonpath='{.type}{" "}{.metadata.uid}{"\n"}'
-# 2) 변경 전 SA 기록 (SA에는 Secret 값이 없고 이름 참조만 있음)
-for sa in transaction-api-sa fds-engine-sa; do oc get sa "$sa" -n "$NS" -o json >"before-$sa.json" || echo "STOP $sa"; done
-# 3) SA마다 resourceVersion 고정 + 항목 1개 추가. 이미 같은 이름이 있으면 STOP(수동 readback)
-for sa in transaction-api-sa fds-engine-sa; do
-  PATCH=$(python3 - "before-$sa.json" "$SECRET" <<'PY'
-import json, sys
-o = json.load(open(sys.argv[1])); s = sys.argv[2]; cur = o.get("imagePullSecrets")
-ops = [{"op": "test", "path": "/metadata/resourceVersion", "value": o["metadata"]["resourceVersion"]}]
-if cur is None:
-    ops.append({"op": "add", "path": "/imagePullSecrets", "value": [{"name": s}]})
-elif any(e.get("name") == s for e in cur):
-    sys.exit("ALREADY_PRESENT")
-else:
-    ops.append({"op": "add", "path": "/imagePullSecrets/-", "value": {"name": s}})
-print(json.dumps(ops))
-PY
-  ) && oc patch sa "$sa" -n "$NS" --type=json -p "$PATCH" || { echo "STOP $sa"; break; }
-done
-# 4) readback: 기존 항목 + 새 항목 1개, UID·automountServiceAccountToken 불변
-for sa in transaction-api-sa fds-engine-sa; do
-  oc get sa "$sa" -n "$NS" -o json >"after-$sa.json"
-  python3 - "before-$sa.json" "after-$sa.json" "$SECRET" <<'PY'
-import json, sys
-b, a, s = json.load(open(sys.argv[1])), json.load(open(sys.argv[2])), sys.argv[3]
-want = (b.get("imagePullSecrets") or []) + [{"name": s}]
-ok = (a.get("imagePullSecrets") == want and a["metadata"]["uid"] == b["metadata"]["uid"]
-      and a.get("automountServiceAccountToken") is False)
-print(a["metadata"]["name"], "SA_PULL_LINK_PASS" if ok else "SA_PULL_LINK_FAIL", [e["name"] for e in a.get("imagePullSecrets", [])])
-PY
-done
+# 하영 named admin으로 oc login 된 셸에서. RUN 폴더는 회수 때 같은 경로를 씁니다.
+RUN=~/sa-pull-link-$(TZ=KST-9 date +%Y%m%dT%H%M%S)
+bash platform/rbac/bootstrap/sa-pull-link.sh link "$RUN"      # RESULT=LINK_PASS
 ```
 
-**원복** (회수 상한 10/23 23:59 KST, Secret·Robot 회수보다 먼저): 앱 소비를 멈춘 뒤, 이번에 추가한 항목 1개만 지웁니다. 다른 항목은 건드리지 않습니다.
+**원복** (회수 상한 10/23 23:59 KST, Secret·Robot 회수보다 먼저): 앱 소비를 멈춘 뒤, link 때의 같은 RUN 폴더로 실행합니다. 다른 셸·다른 날이라도 그 RUN 폴더를 그대로 넘겨받아 씁니다.
 
 ```bash
-for sa in transaction-api-sa fds-engine-sa; do
-  oc get sa "$sa" -n "$NS" -o json >"pre-revert-$sa.json"
-  PATCH=$(python3 - "pre-revert-$sa.json" "$SECRET" <<'PY'
-import json, sys
-o = json.load(open(sys.argv[1])); s = sys.argv[2]
-idx = [i for i, e in enumerate(o.get("imagePullSecrets") or []) if e.get("name") == s]
-if len(idx) != 1:
-    sys.exit("NOT_EXACTLY_ONE")
-i = idx[0]
-print(json.dumps([{"op": "test", "path": "/metadata/resourceVersion", "value": o["metadata"]["resourceVersion"]},
-                  {"op": "test", "path": f"/imagePullSecrets/{i}/name", "value": s},
-                  {"op": "remove", "path": f"/imagePullSecrets/{i}"}]))
-PY
-  ) && oc patch sa "$sa" -n "$NS" --type=json -p "$PATCH" || { echo "STOP $sa"; break; }
-  oc get sa "$sa" -n "$NS" -o jsonpath='{.metadata.name}{" "}{.imagePullSecrets[*].name}{"\n"}'
-done
+bash platform/rbac/bootstrap/sa-pull-link.sh revert "$RUN"    # RESULT=REVERT_PASS
 ```
+
+`RESULT=STOP`이 나오면 다시 실행하지 말고 `$RUN/ledger.txt`와 그 단계 파일로 수동 readback한 뒤 인수합니다.
 
 회수 뒤에도 앱을 계속 띄우려면 Robot·Secret 수명 연장이 먼저 필요합니다(이권욱 GO). 연장하지 않으면 이 매니페스트의 두 줄도 후속 PR로 되돌립니다.
 
@@ -295,6 +267,7 @@ bash platform/rbac/bootstrap/mock-test-post.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-classify.sh; echo "rc=$?"
 bash platform/rbac/bootstrap/mock-test-receipt.sh; echo "rc=$?"   # jq 불필요
 bash platform/rbac/bootstrap/mock-test-d11d.sh; echo "rc=$?"      # README D-11d Bash 예시 그대로 실행, jq 불필요
+bash platform/rbac/bootstrap/mock-test-sa-pull-link.sh; echo "rc=$?"   # 가짜 oc, jq 불필요(python3 필요, Windows는 PY=py)
 # Windows: powershell -NoProfile -ExecutionPolicy Bypass -File platform/rbac/bootstrap/mock-test-d11d.ps1   # README D-11d PowerShell 예시
 ```
 
