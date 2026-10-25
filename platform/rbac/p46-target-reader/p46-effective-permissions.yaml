@@ -1,0 +1,330 @@
+# 권한 조회 16건입니다. Role을 변경하거나 SA TokenRequest를 수행하지 않습니다.
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "",
+      "version": "v1",
+      "resource": "services",
+      "name": "transaction-api",
+      "namespace": "fds-app",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "",
+      "version": "v1",
+      "resource": "services",
+      "name": "transaction-api",
+      "namespace": "fds-app",
+      "verb": "patch"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "",
+      "version": "v1",
+      "resource": "services",
+      "name": "fds-engine",
+      "namespace": "fds-app",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "",
+      "version": "v1",
+      "resource": "services",
+      "name": "fds-engine",
+      "namespace": "fds-app",
+      "verb": "patch"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "apps",
+      "version": "v1",
+      "resource": "deployments",
+      "name": "transaction-api",
+      "namespace": "fds-app",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "apps",
+      "version": "v1",
+      "resource": "deployments",
+      "name": "transaction-api",
+      "namespace": "fds-app",
+      "verb": "patch"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "apps",
+      "version": "v1",
+      "resource": "deployments",
+      "name": "fds-engine",
+      "namespace": "fds-app",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "apps",
+      "version": "v1",
+      "resource": "deployments",
+      "name": "fds-engine",
+      "namespace": "fds-app",
+      "verb": "patch"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "route.openshift.io",
+      "version": "v1",
+      "resource": "routes",
+      "name": "transaction-api-api",
+      "namespace": "fds-app",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "route.openshift.io",
+      "version": "v1",
+      "resource": "routes",
+      "name": "transaction-api-api",
+      "namespace": "fds-app",
+      "verb": "patch"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "route.openshift.io",
+      "version": "v1",
+      "resource": "routes",
+      "name": "transaction-api-readyz",
+      "namespace": "fds-app",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "route.openshift.io",
+      "version": "v1",
+      "resource": "routes",
+      "name": "transaction-api-readyz",
+      "namespace": "fds-app",
+      "verb": "patch"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "config.openshift.io",
+      "version": "v1",
+      "resource": "clusterversions",
+      "name": "version",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "",
+      "version": "v1",
+      "resource": "namespaces",
+      "name": "fds-app",
+      "verb": "get"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "authentication.k8s.io",
+      "version": "v1",
+      "resource": "selfsubjectreviews",
+      "verb": "create"
+    }
+  }
+}
+---
+{
+  "apiVersion": "authorization.k8s.io/v1",
+  "kind": "SubjectAccessReview",
+  "spec": {
+    "user": "system:serviceaccount:ci-cd:fds-deployer",
+    "groups": [
+      "system:authenticated",
+      "system:serviceaccounts",
+      "system:serviceaccounts:ci-cd"
+    ],
+    "resourceAttributes": {
+      "group": "authorization.k8s.io",
+      "version": "v1",
+      "resource": "selfsubjectaccessreviews",
+      "verb": "create"
+    }
+  }
+}
