@@ -8,8 +8,8 @@
 
 - 작업자: 하영 또는 해당 클러스터의 기존 관리 권한을 가진 운영자. 타인 암호·토큰을 공유하지 않는다.
 - 대상: `fds-rosa-hcp`, Cluster UUID `37eecf03-b7bc-45e1-8089-5a14a47fccd9`, `fds-app` UID `222bf961-73d9-4743-972f-2d44da216af2`.
-- 수혜자: 기존 SA `ci-cd/fds-deployer`, UID `6a4c1f9f-1291-4f1d-b999-b4dbc5d179c2` 한 개.
-- 새 객체: ClusterRole/ClusterRoleBinding `fds-p2-delivery-target-reader` 각1개. 기존 사람·SA·Role/Binding을 수정하지 않는다.
+- 수혜자: 기존 SA `ci-cd/fds-deployer`, UID `6a4c1f9f-1291-4f1d-b999-b4dbc5d179c2`와 사용자 `gwonuk`이다. 사용자본인의두조회상향요청을반영하되임시cluster-admin은영구화하지않는다.
+- 새 객체: ClusterRole `fds-p2-delivery-target-reader`1개와 ClusterRoleBinding2개(SA용동일이름, User용 `fds-p2-delivery-target-reader-gwonuk`)다. 기존 사람·SA·Role/Binding을 수정하지 않는다. User추가도같은get2개뿐이다.
 - 추가 권한: `config.openshift.io/clusterversions`의 이름 `version` get, core `namespaces`의 이름 `fds-app` get. list/watch/write/Secret/exec/다른 namespace/cluster-admin은 manifest에 없다.
 - 정상 적용 후 추가 앱배포·SA TokenRequest·새 RUN은 이번 변경에 포함하지 않는다. 기존 A1 `PREFLIGHT_DENIED`의 직접 원인은 미확정이므로 “전체 차단 해소”로 표시하지 않는다.
 - 코드/실행 manifest이므로 PR의 정확한 HEAD에 작성자 외 독립 검토를 남기고 검토된 SHA를 사용한다. 본 사용자 결정으로 위2건 적용 범위는 승인되었으며 같은 변경에 대해 권욱에게 반복 GO를 요청하지 않는다. 새 사람용 관리자 권한이 필요하면 이2건 변경과 구분한다.
@@ -26,6 +26,7 @@ oc get namespace fds-app -o jsonpath='{.metadata.uid}{"\n"}'
 oc get serviceaccount fds-deployer -n ci-cd -o jsonpath='{.metadata.uid}{"\n"}'
 oc get clusterrole fds-p2-delivery-target-reader
 oc get clusterrolebinding fds-p2-delivery-target-reader
+oc get clusterrolebinding fds-p2-delivery-target-reader-gwonuk
 ```
 
 서버는 `https://api.fds-rosa-hcp.khht.p3.openshiftapps.com:443`이고 위 UUID/UID가 일치해야 한다. 처음 네 조회 실패·불일치는 STOP이다. 마지막 두 조회는 `NotFound`가 기대이며 Forbidden/timeout을 NotFound로 해석하지 않는다. 이름이 이미 존재하면 overwrite/apply/force 없이 기존 UID·정의를 읽어 인수한다. 비중첩을 확인한다.
@@ -42,6 +43,8 @@ oc create --dry-run=server -f p46-target-reader-binding.yaml -o yaml
 oc create -f p46-target-reader-binding.yaml -o json
 oc get clusterrolebinding fds-p2-delivery-target-reader -o json
 ```
+
+사용자binding도동일하게 `oc create --dry-run=server -f p46-target-reader-gwonuk-binding.yaml -o yaml`→`oc create -f p46-target-reader-gwonuk-binding.yaml -o json`→`oc get clusterrolebinding fds-p2-delivery-target-reader-gwonuk -o json`으로확인한다.
 
 명령마다 RC를 확인한다. Role은2규칙만, Binding은위 roleRef와SA1개만인지 읽기 대조하고 생성 UID 두 개를 보존한다. 중간 실패 시 새 Role을 남겼는지 읽기 확인하고 자기 생성분만 아래 순서로 정리한다. 자동 재생성·기존 객체 덮어쓰기는 하지 않는다.
 
@@ -78,7 +81,7 @@ oc delete clusterrolebinding fds-p2-delivery-target-reader
 oc get clusterrolebinding fds-p2-delivery-target-reader
 ```
 
-Binding 부재(`NotFound`)를 확인한 뒤, 동일 Role을 참조하는 다른 Binding이 없고 Role UID/정의가 자기 생성분과 동일한지 확인해 Role을 삭제하고 부재를 확인한다. 기본 bootstrap/human RoleBinding·다른 사용자 권한은 정리하지 않는다. 회수 시각·RC·부재 확인을 #55에 연결한다.
+두Binding의자기UID/정의를대조해각각삭제·부재(`NotFound`)를확인한뒤, 동일 Role을 참조하는 다른 Binding이 없고 Role UID/정의가 자기 생성분과 동일한지 확인해 Role을 삭제하고 부재를 확인한다. 기본 bootstrap/human RoleBinding·다른 사용자 권한은 정리하지 않는다. 회수 시각·RC·부재 확인을 #55에 연결한다.
 
 ## 최종 CI/CD 일괄 대조
 
@@ -89,3 +92,6 @@ Binding 부재(`NotFound`)를 확인한 뒤, 동일 Role을 참조하는 다른 
 기존 #46 댓글에 다음 값만 남긴다: 검토/적용 SHA, 실행자, KST, 대상 UUID/SA UID, 새 Role/Binding UID, 두 규칙 readback, 두 실효 조회 결과 또는 미확인 사유, 임시 작업자 권한 회수 여부(해당 시), #55 회수 인수. raw 자격·kubeconfig·Secret은 올리지 않는다.
 
 STATIC/REVIEW/MERGE/RUNTIME을 구분한다. 이 문서 작성 시 실제 권한 변경은 아직 미실행이다.
+
+
+사용자요청추가: 임시cluster-admin회수후본인새세션에서두get이허용되고 `oc auth can-i '*' '*'`가no인지확인한다. 기존namespace임시admin과별개이다.

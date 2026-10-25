@@ -42,3 +42,8 @@ STATIC은 로컬 YAML 파싱·종류/이름/추가2규칙/SA1개·코드에서�
 00:13:39~00:13:53 KST, 본인 `gwonuk`·정확한 Cluster/Namespace/SA UID에서 관리자 `oc auth can-i '*' '*'`는 **yes/RC0**였다. 같은 세션에서 SA 대상 SubjectAccessReview16건은 **14 ALLOW / 2 DENY**, evaluationError0이었다. DENY는 위 두 식별get뿐이며 get/patch12·본인 review create2는 허용이었다. 사람 계정 임시상향이 배포 SA에 자동승계되지 않음을 실제로 확인했다. SA 토큰발급/실제RBAC/앱쓰기0이며 두 Deployment replicas0·Pod0도 읽기 확인했다. 본인 OAuth logout RC0→후속whoami RC1·memfd닫기완료이다.
 
 원본은 고정 비공개 검토폴더 인계 대상 `OC_ADMIN_READONLY_RESULT.json`이다. 이 실측은 현재 일괄16개 권한조회이며 과거 A1의 정확한 실패 role/HTTP 원인이나 향후 전체 preflight 성공을 단정하는 근거는 아니다. 이번 2get 추가 실제 적용은 아직 NOT_RUN이다.
+
+
+## 본인 계정의 두 조회 추가
+
+사용자가 부족한권한을본인계정에도남기도록요청했다. `gwonuk`은현재임시cluster-admin yes이므로당장부족은없지만, 임시관리자회수후에도식별조회가되도록같은2get Role을가리키는사용자전용Binding을추가한다. SA전용Binding은변경하지않는다. Userbinding도10/26최종회수대상이며상시cluster-admin은부여하지않는다.
