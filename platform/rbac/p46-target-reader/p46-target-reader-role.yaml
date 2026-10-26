@@ -1,0 +1,46 @@
+{
+  "apiVersion": "rbac.authorization.k8s.io/v1",
+  "kind": "ClusterRole",
+  "metadata": {
+    "name": "fds-p2-delivery-target-reader",
+    "labels": {
+      "team": "321team",
+      "project": "fds-hybrid",
+      "purpose": "p46-target-identity"
+    },
+    "annotations": {
+      "fds-hybrid/reason": "baseline#46 target identity preflight read",
+      "fds-hybrid/expires": "2026-10-26T12:00:00+09:00"
+    }
+  },
+  "rules": [
+    {
+      "apiGroups": [
+        "config.openshift.io"
+      ],
+      "resources": [
+        "clusterversions"
+      ],
+      "resourceNames": [
+        "version"
+      ],
+      "verbs": [
+        "get"
+      ]
+    },
+    {
+      "apiGroups": [
+        ""
+      ],
+      "resources": [
+        "namespaces"
+      ],
+      "resourceNames": [
+        "fds-app"
+      ],
+      "verbs": [
+        "get"
+      ]
+    }
+  ]
+}

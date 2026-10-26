@@ -1,0 +1,28 @@
+{
+  "apiVersion": "rbac.authorization.k8s.io/v1",
+  "kind": "ClusterRoleBinding",
+  "metadata": {
+    "name": "fds-p2-delivery-target-reader-gwonuk",
+    "labels": {
+      "team": "321team",
+      "project": "fds-hybrid",
+      "purpose": "p46-target-identity"
+    },
+    "annotations": {
+      "fds-hybrid/reason": "baseline#46 gwonuk identity reads after temporary cluster-admin recall",
+      "fds-hybrid/expires": "2026-10-26T12:00:00+09:00"
+    }
+  },
+  "roleRef": {
+    "apiGroup": "rbac.authorization.k8s.io",
+    "kind": "ClusterRole",
+    "name": "fds-p2-delivery-target-reader"
+  },
+  "subjects": [
+    {
+      "kind": "User",
+      "apiGroup": "rbac.authorization.k8s.io",
+      "name": "gwonuk"
+    }
+  ]
+}
